@@ -1,0 +1,6 @@
+# S0-verified Windows CPU pipeline environment. Do not install this file into
+# the product backend environment unless intentionally provisioning MinerU.
+mineru[pipeline]==3.4.5
+torch==2.14.0
+torchvision==0.29.0
+six==1.17.0

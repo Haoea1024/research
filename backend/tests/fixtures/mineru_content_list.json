@@ -1,0 +1,43 @@
+[
+  {
+    "type": "text",
+    "text": "A Paper Title",
+    "text_level": 1,
+    "bbox": [100, 50, 900, 100],
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "Normal paragraph text.",
+    "bbox": [100, 120, 900, 180],
+    "page_idx": 0
+  },
+  {
+    "type": "page_number",
+    "text": "1",
+    "bbox": [480, 950, 520, 980],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/figure.jpg",
+    "image_caption": ["Figure 1. An embedded caption without a distinct bbox."],
+    "bbox": [120, 220, 880, 600],
+    "page_idx": 0
+  },
+  {
+    "type": "table",
+    "img_path": "images/table.jpg",
+    "table_caption": ["Table 1. A caption with a measured bbox."],
+    "table_caption_bbox": [120, 620, 880, 650],
+    "table_body": "<table><tr><td>1</td></tr></table>",
+    "bbox": [120, 660, 880, 850],
+    "page_idx": 0
+  },
+  {
+    "type": "equation",
+    "text": "$$x + y = z$$",
+    "bbox": [200, 100, 800, 150],
+    "page_idx": 1
+  }
+]

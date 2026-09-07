@@ -1,0 +1,14 @@
+database:
+  path: data/app.db
+parser:
+  command: mineru
+  backend: pipeline
+  timeout_seconds: 480
+  output_dir: data/parsed
+storage:
+  upload_dir: data/uploads
+llm:
+  timeout_seconds: 60
+  retries: 1
+  providers: {}
+  tasks: {}

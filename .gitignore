@@ -3,9 +3,20 @@ __pycache__/
 *.pyc
 *.log
 .env
+.env.*
+!.env.example
 .claude/
 .pytest_cache/
+.coverage
+coverage/
+htmlcov/
+logs/
+*.db
+*.sqlite
+*.sqlite3
 mineru_meta.json
+data/
+backend/data/
 # 模型权重
 *.pt
 *.pth
@@ -13,7 +24,14 @@ mineru_meta.json
 *.safetensors
 *.gguf
 *.onnx
+*.ckpt
 spike/out/
 spike/bbox_viewer/index.html
 spike/bbox_viewer/pages/
 spike/papers/*.pdf
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+frontend/.vite/
