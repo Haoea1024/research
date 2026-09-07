@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+.env
+.claude/
+.pytest_cache/
+mineru_meta.json
+# 模型权重
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+*.onnx
+spike/out/
+spike/bbox_viewer/index.html
+spike/bbox_viewer/pages/
+spike/papers/*.pdf
