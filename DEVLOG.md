@@ -68,3 +68,8 @@ MinerU 3.4.5 的 PyPI metadata 声明 Python `>=3.10,<3.14`。本文不再把未
 - Qwen3-VL 对比因没有已批准的 API key 和实现范围而 blocked。
 - GPU/vllm 路线需要 WSL2/Docker/显存方面的架构决策，当前不影响 CPU pipeline。
 - 未经用户确认不得进入 S1。
+
+## 2026-09-07 — 项目入口文档
+
+- 新增根目录 `README.md`，汇总项目定位、S0 实测结果、S0→S7 路线、复现命令、目录结构和当前阻塞项。
+- 将 README 同步列为工程纪律：阶段、功能、目录、依赖、命令、架构决策或阻塞变化时，必须在同一次提交中更新 README。
