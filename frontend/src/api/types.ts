@@ -44,3 +44,43 @@ export interface Figure {
   status: string | null;
   error: string | null;
 }
+
+export type TranslationStatus =
+  | "pending"
+  | "queued"
+  | "translating"
+  | "done"
+  | "failed"
+  | "skipped";
+
+export interface Translation {
+  block_id: string;
+  status: TranslationStatus;
+  zh_text: string | null;
+  error: string | null;
+  model: string | null;
+  glossary_version: number | null;
+  updated_at: string | null;
+  cached: boolean;
+  retranslate_failed?: boolean;
+  skip_reason?: string | null;
+}
+
+export interface TranslateRun {
+  run_id: string;
+  paper_id: string;
+  total: number;
+  states: Record<string, TranslationStatus>;
+}
+
+export interface TranslationProgress {
+  run_id: string;
+  status?: "preparing_glossary" | "running" | "success" | "failed";
+  total: number;
+  pending: number;
+  queued: number;
+  translating: number;
+  done: number;
+  failed: number;
+  skipped: number;
+}

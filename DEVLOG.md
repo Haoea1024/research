@@ -178,4 +178,223 @@ production build 主 JS 约 906.30 kB（gzip 276.40 kB），pdf.worker 约 1,265
 
 ### S2 结论
 
-S2 代码、前后端测试、production build 和真实 ResNet Chrome 验收均已完成，等待用户确认。尚未 commit/push，也未进入 S3。
+S2 代码、前后端测试、production build 和真实 ResNet Chrome 验收均已完成，并已由用户确认通过。
+
+## 2026-09-07 — S3：结构化术语与分块翻译流水线
+
+### 阶段启动与 checkpoint
+
+- S0、S1、S2 均已由用户验收通过。
+- 编码前安全检查未发现 `.env`、API key、token、密码、PDF、数据库、模型权重、MinerU 生成物、日志、上传文件或不应提交的绝对运行路径。
+- 后端 32 tests、前端 15 tests、production build 和 staged diff check 均通过。
+- 已创建并 push checkpoint：`07c2693 feat: complete S0-S2 paper reading foundation`，分支 `main`，remote `origin`。
+- S3 当前只获批编码与 fake/mock 验收；禁止真实收费 LLM 调用，暂不 commit/push，也不进入 S4-S6。
+
+### 依赖与 schema
+
+- 安装前 dry-run 确认 `sse-starlette==3.4.10` 所需 Starlette/anyio 与当前 FastAPI 0.141.1、Starlette 1.6.0、anyio 4.15.1 兼容；`Jinja2==3.1.6` 已满足。
+- 仅在 Conda `paper-agent` 安装并锁定 `sse-starlette==3.4.10`、`Jinja2==3.1.6`，使用 `--no-deps`，`pip check` 为 `No broken requirements`；未升级任何既有 Python/MinerU 依赖，未新增 npm 包。
+- `translations` 幂等增加 `error TEXT`，保留 `zh_text NOT NULL`；schema version 从 1 升为 2，可在无 Alembic 情况下幂等升级既有数据库。
+
+### fake/mock 实现结果
+
+- glossary 使用严格 Pydantic `source,target` 结构，按 paper/version 持久化，支持 UTF-8 BOM CSV。并发请求执行“查询 → per-paper lock → 再查询 → 调用”，测试证明只生成一次。
+- 翻译范围支持 1-based pages、block_ids 和交集；非本 Paper ID 返回 422，所有入口统一过滤 `is_translatable=1`。
+- 常规 batch size 4，按 `order_idx` 邻近且跨度不超过 3 组批；小 scope、viewport 或重译允许 1–2，不把远距离块拼批。
+- prompt 使用 Jinja/StrictUndefined 模板，携带标题、目标块、前后各 1 个 context-only Block 和局部命中 glossary；返回 ID 的“不少、不多、不重复、不为空”进入 Pydantic 校验并享有一次结构化纠错重试。
+- Run 与真实 Block work item 分离。重叠 Run 订阅同一个 work item，fake 测试中两个 Run 均 finished，而 glossary 和 translate 各只调用一次。
+- 队列为单 worker + heapq + asyncio.Condition；generation lazy invalidation 支持 viewport 插队。当前 viewport 为 0、后端推导下一屏为 1、scope 为 2、全文为 3、单块重译为 -1；已发出的调用不取消。
+- done/failed 以 SQLite 为权威。done 再次提交直接 cached，不收费；失败保存 `zh_text=""` 与原始 error。已有 done 的单块重译直到成功才原子替换，失败时数据库旧译文和原 error=NULL 均保持不变；单块重译不生成/更新 glossary。
+- 中文比例按 CJK/(CJK+Latin) 计算，忽略数字、标点、空白和 LaTeX 命令。低于 config 0.4 时只重译失败 Block 一次，第二次仍低则持久化 `LANGUAGE_DRIFT` failed。
+- SSE 实现 block/progress/error/finished、单调 live event ID 和每 Run 256 条 ring buffer。断线不取消 worker；注册订阅早于快照输出，避免 snapshot/subscription 丢事件窗口；重连可由 SQLite/Run snapshot 恢复后继续接收 live event。
+- 前端保留 S2 Reader/PdfPane/SyncController 与 `block.id` 身份，只新增翻译 store/API/SSE reader、中文优先、英文展开、pending/queued/translating/done/failed、错误诊断和重译按钮。Figure/Table/Formula 阶段边界保持不变。
+
+### fake/mock 验收
+
+| 检查 | 结果 |
+|---|---:|
+| 后端 pytest | 48 passed（含真实调用前的错误脱敏与 cached token 日志回归） |
+| 后端第三方弃用告警 | 2（既有已接受告警） |
+| 前端 Vitest | 9 files / 23 tests passed |
+| TypeScript + Vite production build | 通过 |
+| Chrome E2E | 2 passed（真实 ResNet Reader + fake S3 SSE） |
+| 真实收费 LLM 调用 | 0 |
+
+后端测试覆盖 schema v1→v2、glossary 并发锁/CSV、batch、scope、缓存、重叠 Run、viewport 优先级、漂移重试/失败、SSE 断线重连、单块重译旧缓存保护和完整 API fake 链路。Chrome fake SSE 验证点击“开始/继续翻译”后中文替换英文、原文可展开、progress 更新；真实 ResNet Reader 回归仍覆盖 12 页、bbox、公式、Figure/Table 和同步滚动。
+
+### 第一次真实试译前置状态
+
+- `config.yaml` 当前 `llm.providers`/`llm.tasks` 仍为空，因此 glossary provider/model、translate provider/model、base_url 和 key 环境变量尚未确定；不会意外产生真实调用。
+- 既有 ResNet 数据只读统计：12 页、136 个可翻译 Block（114 text + 22 title）、49,313 个源字符；12 Figure、15 Table、2 Formula 均不发送给翻译模型。
+- 按当前局部连续 batch 算法，全文预计 39 次 translate 调用，加 1 次 glossary，共约 40 次；若触发语言漂移，每个失败 Block额外最多 1 次。
+- 粗略 token 预算：glossary 输入约 7.5k–10k；全部翻译含重复上下文/局部术语约 25k–40k input tokens，约 15k–25k output tokens。实际 tokenizer、prompt 命中和译文长度会改变结果。
+- 在 provider/base_url 与具体计价未确认前，无法给出可信货币费用；费用公式为各模型 input/output token 分别乘对应单价。用户先前提到的 `DeepSeek-V4-Pro-0813`（glossary）与 `DeepSeek-V4-Flash`（translate）仍只是待确认路由，不写入业务代码、不视为调用授权。
+
+### 与设计文档的差异和当前限制
+
+- 依用户裁定不新增 `translation_runs`；Run、订阅和 SSE ring buffer 在内存中，进程重启不恢复原 scope，但 SQLite done/failed 仍保留，重新提交只处理未完成块。
+- `tech-plan.md` 的示意流程没有定义重叠 Run 去重和重译旧缓存保护；本轮按追加裁定实现为共享 Block work item 和成功后原子替换。
+- `paper-reading-agent-design.md` 描述完整最终产品；S3 未实现 Embedding/RAG/问答/视觉卡片/报告，也未修改 MinerU、bbox 和同步架构。
+- 当前单 worker 以成本幂等和可预测插队为先；不会取消已发模型调用，新 viewport 在当前调用结束后优先。
+- production build 仍有 S2 已接受的大 chunk 告警，本轮不新增依赖或做无关分包。
+
+### S3 fake/mock 结论
+
+S3 获批的 fake/mock 全链路已完成，没有真实 LLM 调用。按约定在第一次真实 ResNet 试译前停止，等待用户确认运行时 provider/model/base_url/key 环境变量、试译页数和费用。
+
+## 2026-09-08 — S3 第一次真实调用：smoke 通过，第一页 baseline 因 glossary 超时停止
+
+### 运行时配置与安全边界
+
+- 平台为 Paratera，OpenAI-compatible Chat Completions，应用 Base URL 为 `https://llmapi.paratera.com/v1`。
+- glossary/translate 均路由到实际 model ID `DeepSeek-V4-Pro-0813`；LiteLLM 使用 `openai/DeepSeek-V4-Pro-0813` 协议前缀。
+- key 只从 `PAPER_AGENT_API_KEY` 读取；本文档、配置、源码和输出均未记录真实值。
+- 调用前新增 Bearer/API key/token 错误脱敏，并补充 OpenAI `prompt_tokens_details.cached_tokens` 日志读取。
+
+### 最小真实 smoke
+
+- 只执行 1 个 HTTP 请求；smoke 内存配置关闭 transport retry、`max_tokens=32`，并用 guard 禁止结构化校验发出第二个网络请求。
+- 结果成功：Base URL、Bearer 认证、model ID、LiteLLM `openai/` 路由、Chat Completions 响应和 Pydantic 结构化解析兼容。
+- structured-output retry 为 0；96 input tokens、55 output tokens、cache read 0、latency 15,260 ms。
+- LiteLLM 未识别自定义模型价格，`cost=NULL`；按平台单价计算 smoke `estimated_cost=¥0.002349`。
+
+### ResNet 第 1 页失败与停止原因
+
+- scope 校验为 `pages=[1]`、17 个可翻译 Block；没有扩大到其他页面。
+- 第一个 batch 在生成论文 glossary 时，两个 HTTP 尝试（初次 + 既有一次 transport retry）均返回脱敏后的 `APITimeoutError - Request timed out`，没有产生 glossary、translate 成功记录或 token usage。
+- Block order 0–3 已持久化为 `failed`，`zh_text=""`，错误为脱敏后的 glossary timeout；glossary_terms 仍为 0。
+- worker 随后处理下一 batch，因为 glossary 尚不存在而错误地再次发起 glossary。发现后立即终止进程；该第三个请求在途时被中断，没有继续等待或提交后续 batch。
+- 实际 translate 调用为 0；structured-output retry 和 language-drift retry 均为 0；真实中文 UI 验收与同 scope 零调用 cache 验收无法进行。
+- 成功响应可计算成本只有 smoke 的 ¥0.002349。超时/中断请求没有 token usage，是否计费及金额未知，不能伪造 estimated cost。
+
+### 暴露的 pipeline 问题
+
+- glossary 当前在每个 batch 内 `ensure()`；首次生成失败不会形成共享失败状态，导致后续 batch 再次尝试，违背每篇/每 Run 单次 glossary 生成与调用数约束。
+- 下一次真实授权前需要先改为 glossary 的 Run/paper 级共享准备步骤：只调用一次；成功后所有 batch 复用，失败则整个 Run fail-fast，禁止逐 batch 重试。
+- Paratera 上该 30,000 字符 glossary prompt 未能在现有 60 秒内完成。需要用户决定是提高 timeout、缩小 glossary source，或采取其他单一方案；不得自行猜测并重复调用。
+- `llm_calls` 当前只记录成功响应，因此两个 timeout 与一个被中断请求没有行记录；Translation error 保留了脱敏原始诊断。若要求失败 HTTP attempt 也进入 `llm_calls`，需要另行设计 schema/日志语义。
+
+### 当前结论
+
+最小 API smoke 通过，但 ResNet 第 1 页最高质量 baseline 未完成。已停止所有真实调用；不进入第二页、全文、Flash A/B 或 S4，等待用户裁定 glossary fail-fast 修复和 timeout/source 范围策略。
+
+## 2026-09-08 — S3 glossary fail-fast 修复（仅 fake/mock）
+
+### 生命周期与输入收敛
+
+- glossary 从 batch 内提升为 Translation Run 的共享前置 gate。Run 先保持 Block `pending`，执行一次 `ensure_glossary`；成功后才建立/订阅 Block work item，所有 batch 只读取已持久化 glossary。
+- 同一 Paper 缺 glossary 的重叠 Run 继续使用 per-paper async lock 与锁内二次查询，fake 并发测试中 glossary LLM 总调用为 1；已有 glossary 时为 0。
+- glossary 失败只产生一次全局 `GLOSSARY_PREPARATION_FAILED` error，随后 `finished(status=failed)`；没有进入 translate 的 Block 不创建 `Translation(status=failed)` 行，UI 保持 pending/英文 fallback 并显示页面级可重启提示。
+- glossary source 改为标题、摘要、章节标题、本地抽取的高频专名、缩写及模型/模块/数据集候选。配置为 `glossary.max_source_chars=14000`，只在完整 Block/候选项边界截断。
+- ResNet 165 Block 实测候选 source 为 5,507 字符、114 个条目：1 个 Paper title、22 个 heading、2 个 abstract Block、89 个候选项；原先请求约 30,000 字符。
+
+### LLM 配置与失败审计
+
+- task route 支持最小 timeout/retry override：glossary 180 秒、0 transport retry；translate 60 秒、1 transport retry。
+- SQLite schema version 升为 3；`llm_calls` 幂等增加 `status` 与 `error`。成功记录为 `success`；失败 attempt 为 `timeout/error`，usage 不可得时 token/cost 保持 NULL，错误在落库前脱敏。
+- fake timeout 审计示例：`task=glossary`、`model=openai/DeepSeek-V4-Pro-0813`、`tokens_in=NULL`、`tokens_out=NULL`、`cost=NULL`、`status=timeout`、`error=APITimeoutError: ...`（认证信息已脱敏）。
+
+### 精准清理与回归
+
+- 仅清理 Paper `0e82764a-ae5a-4f8a-a212-e2896ee50702` 下本次污染的 4 行 Translation：`0e82764a-ae5a-4f8a-a212-e2896ee50702:0`、`:1`、`:2`、`:3`。
+- 删除前逐项确认 Block 属于该 Paper、Translation 为 `status=failed`、`zh_text=""` 且 error 来自本次 glossary timeout；事务删除恰好 4 行，删除后上述 ID 剩余 0 行。未删除其他 Paper、Block、glossary、LLM audit 或解析数据。
+- fake Case A-F 均覆盖：成功一次准备服务多个 batch；timeout 为 glossary 1/translate 0/Block failed rows 0；两个 batch 不重复生成；重叠 Run 共用一次生成；已有 glossary 0 调用；task-level 180/0 与 60/1 生效。
+
+| 检查 | 结果 |
+|---|---:|
+| 后端 pytest | 55 passed |
+| 后端第三方弃用告警 | 2（既有已接受告警） |
+| 前端 Vitest | 9 files / 24 tests passed |
+| TypeScript + Vite production build | 通过 |
+| `git diff --check` | 通过（仅 Git 的 CRLF 提示） |
+| 新增真实 LLM 请求 | 0 |
+
+下一次 glossary 真实调用预计约 5,507 个 source 字符，连同 prompt 约 1.5k–2k input tokens；实际以 API usage 为准。本次不 commit、不 push、不进入 S4，等待用户重新授权。
+
+## 2026-09-08 — ResNet glossary-only 真实验收
+
+- 严格使用 `DeepSeek-V4-Pro-0813`、180 秒 timeout、0 transport retry；没有实例化 TranslationManager，也没有创建 translate run。
+- 真实 glossary 业务调用 1 次、HTTP attempt 1 次、structured retry 0、transport retry 0，状态 success。
+- 实际 latency 107,247 ms；input 1,684 tokens、output 8,223 tokens、cached input 0。LiteLLM cost 为空；按平台公开单价计算 `estimated_cost=¥0.237177`，不是平台账单。
+- 结构化输出通过并持久化 40 个 glossary term，全部 version 1；source/target 空值 0，按大小写与空白规范化后的重复 source 0。
+- 使用会在 cache miss 时立即抛错的本地 guard 再次执行 `ensure_glossary`，成功从 SQLite 返回 40 项，证明后续为 0 LLM cache path。
+- Page 1 Translation 行 0，全库 Translation 行 0；真实 translate business calls 和 HTTP attempts 均为 0。
+- 术语整体覆盖残差学习、网络结构、CV 任务、检测架构、缩写和数据集。待人工复核项包括 `Building Block → 基本构建块`、`Highway Networks → 高速网络`、`R-CNN → R-CNN（区域卷积神经网络）`、`Shortcut Connections → 捷径连接`、`VLAD → 局部聚合描述符向量`，以及 COCO/MS COCO 的粒度一致性。
+- 本轮没有再次发送 glossary、没有翻译任何 Block、没有 commit/push，也没有进入 S4。
+
+## 2026-09-08 — ResNet 第 1 页 V4-Pro translate baseline
+
+### 授权范围与调用审计
+
+- 调用前通过只读 cache guard 确认 glossary 40 项且全部 version 1；第一页 17 个 `is_translatable=1` Block、已有 Translation 0。验收客户端禁止 glossary task，因此新增 glossary business call/HTTP attempt 均为 0。
+- 生产配置保持 translate 60 秒 timeout、1 次 transport retry。实际为 5 个正常 batch、1 次 structured correction、3 次 language-drift retry，共 9 个 translate business calls/HTTP attempts；transport retry 0。
+- 总 usage：8,354 input tokens、18,363 output tokens、cached input 0；API 调用累计 latency 521,765 ms。LiteLLM cost 均为空，按平台单价估算 `estimated_cost=¥0.570987`。
+- 每个 HTTP attempt 的 `(latency_ms, input, output, visible Chinese chars)`：`(13484,571,405,25)`、`(54815,1063,4253,388)`、`(38260,383,2652,29)`、`(17961,1219,1338,448)`、`(114250,1036,4015,501)`、`(43528,2276,574,501)`、`(57418,708,1168,148)`、`(163233,588,2938,51)`、`(18816,510,1020,110)`。多次 output token 远高于可见译文，推测平台 usage 包含隐藏推理 token；这里只记录现象，不修改 reasoning 参数。
+
+### 数据库终态与质量观察
+
+- 17 个目标全部产生权威 Translation 行：12 done、5 failed、cached 0。12 个 done 均为 glossary version 1、`openai/DeepSeek-V4-Pro-0813`、error NULL；5 个 failed 均为 `zh_text=""` 且保留脱敏错误。
+- Block 0、7、8、9、10 等译文正确命中 Deep/Residual Learning、Residual Network、ImageNet、ILSVRC、CIFAR-10、COCO、Image Classification 等 glossary 项。未观察到这些成功块内的明显术语漂移。
+- Block 13 原文为空但 `is_translatable=1`。模型对其返回空译文，严格 schema 两次均拒绝，导致同 batch 的 13–16 四个目标整体 failed；其中 14–16 的模型可见译文没有被部分落库。
+- Block 18 是 URL/脚注，language drift 重译后仍因大量拉丁 URL 使中文比例为 0.0132，最终 failed。这是内容类型过滤与 ratio denominator 的误判，不是普通正文译文漂移。
+- 未覆盖的 `degradation problem` 和 `identity mapping` 所在 Block 15/16 因同 batch 空块结构化失败，无法评价真实译法；第一页没有可评价的 shortcut connections/building block 正文样本。
+- 因当前普通 submit 会把 failed 行重新排队，而用户明确禁止把 failed 自动重试纳入缓存测试，本次没有提交第二个 `pages=[1]` 请求。done cache 路径的 fake 测试仍通过，但“同范围含 failed 为 0 新调用”尚不成立，属于待修复幂等问题。
+
+### 浏览器与回归
+
+- 使用本机 Chrome channel 打开真实 ResNet Reader；真实中文为右栏主体，英文详情正常，failed Block 显示英文 fallback、错误状态和显式重试入口。
+- 真实中文改变 Block 高度后，hover、左→右、右→左、未渲染页跳转、快速滚动与用户接管仍通过；console error 与 page exception 均为 0。未修改 S2 同步架构。
+- 首次 E2E 因测试在 hover 同步后点击已被虚拟列表移出的旧第 0 Block 而超时；移除该测试定位假设后真实 Reader 用例 1/1 通过。产品页面没有对应异常。
+- 完整回归：后端 55 passed（2 条既有第三方告警）、前端 24 passed、production build 通过；Vite 大 chunk 告警保持已接受状态。
+- 本轮未翻译第 2–12 页、未调用 Flash、未修改 glossary、未 commit/push，也未进入 S4。
+
+## 2026-09-08 — 第一页 baseline pipeline 修复（仅 fake/mock）
+
+### Block eligibility 与缓存
+
+- 新增确定性 eligibility：空/纯空白为 `EMPTY_CONTENT`；纯 HTML、URL 脚注、联系邮箱和 arXiv 文档元数据分别标为明确 `skipped`。Skipped Block 不入队、不调用模型、不新建 Translation failed 行，API/SSE/UI 保留英文并显示 skip reason。
+- language ratio 在计数前移除 URL、email 和 HTML 标签，普通中文附带长 URL 不再被大量拉丁字符误判。
+- 普通范围 submit 现在同时缓存 done 和 failed；failed 不再自动重新收费。只有显式 `/retranslate` 会建立新 work item。真实 ResNet 的本地 guard 复验为 done 10、failed 3、skipped 4，0 pending/queued/translating、LLM 调用 0；历史 baseline 行未删除。
+
+### Batch partial commit
+
+- translate batch 改为逐项验证 `block_id`、非空 `zh_text`、重复与缺失；首轮有效 sibling 保留，仅对无效 ID执行一次结构化纠错。
+- 纠错后仍无效的 Block 单独写 failed，其他有效 Block 正常 done；额外 ID 永不落库。纠错 transport 失败也不会破坏首轮已验证译文。
+- fake batch 验证同一批一个有效、一个持续空输出时最终为 1 done/1 failed，而不是整个 batch 失败。
+
+### Timeout 定位
+
+- 本地检查 `litellm==1.77.7` 源码确认 OpenAI-compatible client 默认带内部 retry；此前只传 `timeout=60`，项目外层 retry 与 LiteLLM 内层 retry 叠加，可解释约 163 秒墙钟调用。
+- 每次调用现显式传 `num_retries=0`，由 LiteLLM 映射为 OpenAI client `max_retries=0`；仅保留项目 LLMClient 的 task-level 外层 retry。fake timeout 测试确认 translate 两个外层 attempt 都为 60 秒参数且 `num_retries=0`，glossary 仍为单 attempt 180 秒。
+
+### 回归结果
+
+| 检查 | 结果 |
+|---|---:|
+| 后端 pytest | 60 passed |
+| 前端 Vitest | 9 files / 25 tests passed |
+| production build | 通过 |
+| 第三方弃用告警 | 2（既有已接受） |
+| 新真实 LLM 请求 | 0 |
+
+覆盖 empty Block、URL/email/HTML/document metadata、ratio noise、batch partial failure、failed cache、explicit retranslate、timeout/内部 retry、overlap run、SSE 与既有完整 API fake 链路。本轮未删除真实 baseline 历史行、未 commit/push、未调用 Flash，也未进入 S4。
+
+## 2026-09-08 — ResNet 第 1 页受控 Pro 修复验收
+
+- 调用前确认 glossary version 1、40 项；真实 glossary business call/HTTP attempt 均为 0。
+- 历史 failed 行中，Block `:13` 与 `:18` 已分别归类为 `EMPTY_CONTENT` 和 `URL_METADATA`，未重译。仅显式重译第 1 页有效正文 Block `:14`、`:15`、`:16`。
+- 三个 Block 均一次成功：translate business call 3、HTTP attempt 3、structured/transport/language-drift retry 均为 0；latency 分别为 8,760 / 7,717 / 8,206 ms。
+- usage 合计为 input 1,849、output 1,545、cached input 0；按 Paratera 单价估算 `estimated_cost=¥0.058356`，LiteLLM cost 仍为空。可见译文长度分别为 179 / 147 / 177 字符。
+- 三条 Translation 均为 `done`、glossary version 1、model `openai/DeepSeek-V4-Pro-0813`、error NULL。`degradation problem` 译为“退化问题”，`identity mapping` 稳定译为“恒等映射”。
+- 随后普通提交 `pages=[1]`，得到 done 13、skipped 4、failed 0；新增 glossary/translate business call 与 HTTP attempt 均为 0。
+- Chrome 人工实测确认中文主体、4 个英文 fallback/skip reason、Block 16 hover 双向高亮、左右同步、快速滚动与用户接管正常，console error 为 0。
+- 同步更新真实 Reader E2E 的旧 failed 断言并加入 4 个 skipped 检查；Chrome E2E 2 passed，测试同时捕获 page exception 与 console error，均为 0。
+- 本轮未翻译第 2–12 页、未调用 Flash、未修改 reasoning、未 commit/push，也未进入 S4。
+
+### S3 最终清理与回归
+
+- 删除前再次确认 `0e82764a-ae5a-4f8a-a212-e2896ee50702:13` 与 `:18` 均属于指定 ResNet 第 1 页、旧 Translation 为 failed、`zh_text=""`，且当前分别归类为 `EMPTY_CONTENT` 与 `URL_METADATA`，不是成功译文。
+- 单事务仅删除上述两个 Translation 主键。全库 Translation 从 17 降为 15；Glossary 40、Block 165、LLM audit 14 均未变化，两条目标记录删除后均不存在。
+- 最终 ResNet 第 1 页权威状态为 13 done、4 skipped、0 failed；glossary 为 version 1、40 项，重复 `pages=[1]` 为 0 次新 LLM 调用。
+- 最终无模型回归：后端 60 passed（2 条既有第三方弃用告警）、前端 Vitest 9 files/25 tests、production build、Chrome E2E 2 tests、`pip check` 与 `git diff --check` 均通过。
+- S3 Translation 状态为 COMPLETE。本次收尾没有真实 LLM 请求，没有进入 S4。

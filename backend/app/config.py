@@ -38,6 +38,8 @@ class TaskRoute(BaseModel):
     provider: str
     model: str
     max_tokens: int | None = Field(default=None, ge=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    retries: int | None = Field(default=None, ge=0, le=1)
 
 
 class LLMConfig(BaseModel):
@@ -45,6 +47,17 @@ class LLMConfig(BaseModel):
     retries: int = Field(default=1, ge=0, le=1)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     tasks: dict[str, TaskRoute] = Field(default_factory=dict)
+
+
+class TranslationConfig(BaseModel):
+    batch_size: int = Field(default=4, ge=3, le=5)
+    next_screen_blocks: int = Field(default=12, ge=1)
+    chinese_ratio_threshold: float = Field(default=0.4, gt=0, le=1)
+    event_buffer_size: int = Field(default=256, ge=16)
+
+
+class GlossaryConfig(BaseModel):
+    max_source_chars: int = Field(default=14_000, ge=1_000)
 
 
 class Settings(BaseSettings):
@@ -59,6 +72,8 @@ class Settings(BaseSettings):
     parser: ParserConfig = Field(default_factory=ParserConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    glossary: GlossaryConfig = Field(default_factory=GlossaryConfig)
+    translation: TranslationConfig = Field(default_factory=TranslationConfig)
 
     def resolve_paths(self, root: Path = PROJECT_ROOT) -> "Settings":
         copy = self.model_copy(deep=True)

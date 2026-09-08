@@ -7,8 +7,15 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.config import LLMConfig, ProviderConfig, TaskRoute
-from app.llm.client import LLMCallError, LLMClient, LLMNotConfiguredError, UnknownTaskError
+from app.llm.client import (
+    LLMCallError,
+    LLMClient,
+    LLMNotConfiguredError,
+    UnknownTaskError,
+    redact_sensitive_text,
+)
 from app.llm.structured import StructuredOutputError, call_structured
+from app.llm.schemas import translation_result_schema
 from app.models import LLMCall
 
 
@@ -59,14 +66,84 @@ def test_retry_once_and_log_success(monkeypatch, database):
     response = client.call("test", [{"role": "user", "content": "x"}])
     assert len(calls) == 2
     assert calls[0]["timeout"] == 60
+    assert calls[0]["num_retries"] == 0
     assert calls[0]["model"] == "fake/model"
     assert response["choices"][0]["message"]["content"] == '{"value": 7}'
     with database.session() as session:
-        record = session.scalars(select(LLMCall)).one()
+        records = session.scalars(select(LLMCall).order_by(LLMCall.id)).all()
+        assert len(records) == 2
+        failed, record = records
+        assert failed.status == "timeout"
+        assert "raw timeout" in failed.error
+        assert failed.tokens_in is None
         assert record.task == "test"
+        assert record.status == "success"
         assert record.tokens_in == 3
         assert record.tokens_out == 2
         assert record.cost == 0.01
+
+
+def test_task_route_overrides_timeout_and_retry(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_KEY", "not-a-real-key")
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs)
+        raise TimeoutError("stop")
+
+    config = _config()
+    config.tasks["glossary"] = TaskRoute(
+        provider="fake", model="model", timeout_seconds=180, retries=0
+    )
+    config.tasks["translate"] = TaskRoute(
+        provider="fake", model="model", timeout_seconds=60, retries=1
+    )
+    client = LLMClient(config, completion=completion, sleeper=lambda _: None)
+    with pytest.raises(LLMCallError):
+        client.call("glossary", [])
+    with pytest.raises(LLMCallError):
+        client.call("translate", [])
+    assert len(calls) == 3
+    assert calls[0]["timeout"] == 180
+    assert [call["timeout"] for call in calls[1:]] == [60, 60]
+    assert all(call["num_retries"] == 0 for call in calls)
+
+
+def test_failed_attempt_is_persisted_with_redacted_error(monkeypatch, database):
+    monkeypatch.setenv("TEST_LLM_KEY", "private-test-key")
+
+    def completion(**kwargs):
+        raise RuntimeError(
+            "Authorization: Bearer private-test-key api_key=private-test-key"
+        )
+
+    config = _config()
+    config.retries = 0
+    client = LLMClient(
+        config, completion=completion, session_factory=database.SessionLocal
+    )
+    with pytest.raises(LLMCallError):
+        client.call("test", [])
+    with database.session() as session:
+        record = session.scalars(select(LLMCall)).one()
+        assert record.status == "error"
+        assert record.tokens_in is None
+        assert record.tokens_out is None
+        assert record.cost is None
+        assert "private-test-key" not in record.error
+        assert "[REDACTED]" in record.error
+
+
+def test_logs_openai_nested_cached_tokens(monkeypatch, database):
+    monkeypatch.setenv("TEST_LLM_KEY", "not-a-real-key")
+    payload = _response('{"value": 7}')
+    payload["usage"]["prompt_tokens_details"] = {"cached_tokens": 2}
+    client = LLMClient(
+        _config(), completion=lambda **kwargs: payload, session_factory=database.SessionLocal
+    )
+    client.call("test", [])
+    with database.session() as session:
+        assert session.scalars(select(LLMCall)).one().cache_read_tokens == 2
 
 
 def test_transport_error_keeps_raw_cause(monkeypatch):
@@ -79,6 +156,15 @@ def test_transport_error_keeps_raw_cause(monkeypatch):
     with pytest.raises(LLMCallError, match="raw failure") as error:
         client.call("test", [])
     assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_sensitive_auth_values_are_redacted() -> None:
+    raw = "Authorization: Bearer secret-value api_key=second-secret token=third-secret"
+    safe = redact_sensitive_text(raw, ["secret-value"])
+    assert "secret-value" not in safe
+    assert "second-secret" not in safe
+    assert "third-secret" not in safe
+    assert safe.count("[REDACTED]") == 3
 
 
 def test_images_are_attached_to_last_user_message(monkeypatch):
@@ -148,3 +234,21 @@ def test_structured_validation_fails_explicitly(monkeypatch):
     client = LLMClient(_config(), completion=lambda **kwargs: _response("{}"))
     with pytest.raises(StructuredOutputError, match="failed validation twice"):
         call_structured(client, "test", Answer, [])
+
+
+def test_translation_identity_is_part_of_structured_retry(monkeypatch):
+    monkeypatch.setenv("TEST_LLM_KEY", "not-a-real-key")
+    responses = iter(
+        [
+            _response('{"translations":[{"block_id":"wrong","zh_text":"错误"}]}'),
+            _response('{"translations":[{"block_id":"b1","zh_text":"正确"}]}'),
+        ]
+    )
+    client = LLMClient(_config(), completion=lambda **kwargs: next(responses))
+    result = call_structured(
+        client,
+        "test",
+        translation_result_schema({"b1"}),
+        [{"role": "user", "content": "translate"}],
+    )
+    assert result.translations[0].block_id == "b1"

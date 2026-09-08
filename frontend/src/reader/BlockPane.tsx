@@ -14,13 +14,16 @@ interface BlockPaneProps {
   figures: Figure[];
   onActiveBlock?: (blockId: string) => void;
   onUserIntent?: () => void;
+  onVisibleBlocks?: (blockIds: string[]) => void;
+  onRetranslate?: (blockId: string) => void;
 }
 
 export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function BlockPane(
-  { blocks, figures, onActiveBlock, onUserIntent },
+  { blocks, figures, onActiveBlock, onUserIntent, onVisibleBlocks, onRetranslate },
   ref,
 ) {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const lastVisibleKey = useRef("");
   const indexById = useMemo(
     () => new Map(blocks.map((block, index) => [block.id, index])),
     [blocks],
@@ -48,13 +51,21 @@ export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function Bl
     const offset = Math.round((range.endIndex - range.startIndex) * ACTIVE_LINE_RATIO);
     const block = blocks[Math.min(range.endIndex, range.startIndex + offset)];
     if (block) onActiveBlock?.(block.id);
+    const visibleIds = blocks
+      .slice(range.startIndex, range.endIndex + 1)
+      .map((item) => item.id);
+    const visibleKey = visibleIds.join("\u0000");
+    if (visibleKey !== lastVisibleKey.current) {
+      lastVisibleKey.current = visibleKey;
+      onVisibleBlocks?.(visibleIds);
+    }
   };
 
   return (
-    <section className="block-pane" aria-label="英文块流">
+    <section className="block-pane" aria-label="翻译块流">
       <header className="pane-header">
-        <strong>英文块流</strong>
-        <span>S2 暂不翻译</span>
+        <strong>中文翻译块流</strong>
+        <span>英文按块回退</span>
       </header>
       <div
         className="block-list-shell"
@@ -68,7 +79,11 @@ export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function Bl
           rangeChanged={handleRangeChanged}
           computeItemKey={(_, block) => block.id}
           itemContent={(_, block) => (
-            <BlockCard block={block} figure={figuresByBlockId.get(block.id)} />
+            <BlockCard
+              block={block}
+              figure={figuresByBlockId.get(block.id)}
+              onRetranslate={onRetranslate}
+            />
           )}
         />
       </div>

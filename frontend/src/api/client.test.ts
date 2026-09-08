@@ -23,4 +23,14 @@ describe("paperApi", () => {
       expect.objectContaining({ status: 404, detail: "paper not found" }),
     );
   });
+
+  it("sends only visible block ids to the viewport endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await paperApi.viewport("paper/id", ["b1", "b2"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/papers/paper%2Fid/viewport",
+      expect.objectContaining({ body: JSON.stringify({ visible_block_ids: ["b1", "b2"] }) }),
+    );
+  });
 });

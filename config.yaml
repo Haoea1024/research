@@ -10,5 +10,25 @@ storage:
 llm:
   timeout_seconds: 60
   retries: 1
-  providers: {}
-  tasks: {}
+  providers:
+    openai:
+      api_key_env: PAPER_AGENT_API_KEY
+      base_url: https://llmapi.paratera.com/v1
+  tasks:
+    glossary:
+      provider: openai
+      model: DeepSeek-V4-Pro-0813
+      timeout_seconds: 180
+      retries: 0
+    translate:
+      provider: openai
+      model: DeepSeek-V4-Pro-0813
+      timeout_seconds: 60
+      retries: 1
+glossary:
+  max_source_chars: 14000
+translation:
+  batch_size: 4
+  next_screen_blocks: 12
+  chinese_ratio_threshold: 0.4
+  event_buffer_size: 256

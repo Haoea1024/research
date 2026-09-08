@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any, Callable, Sequence
@@ -47,6 +48,23 @@ class LLMClient:
         self.session_factory = session_factory
         self.sleeper = sleeper
 
+    def model_for_task(self, task: str) -> str:
+        route = self.config.tasks.get(task)
+        if route is None:
+            raise UnknownTaskError(f"unknown LLM task: {task}")
+        if route.provider not in self.config.providers:
+            raise LLMNotConfiguredError(
+                f"provider {route.provider!r} for task {task!r} is not configured"
+            )
+        return route.model if "/" in route.model else f"{route.provider}/{route.model}"
+
+    def safe_error(self, error: BaseException) -> str:
+        secrets = [
+            os.getenv(provider.api_key_env, "")
+            for provider in self.config.providers.values()
+        ]
+        return f"{type(error).__name__}: {redact_sensitive_text(repr(error), secrets)}"
+
     def call(
         self,
         task: str,
@@ -69,16 +87,17 @@ class LLMClient:
                 f"environment variable {provider.api_key_env!r} is not set"
             )
 
-        model = (
-            route.model
-            if "/" in route.model
-            else f"{route.provider}/{route.model}"
-        )
+        model = self.model_for_task(task)
+        timeout_seconds = route.timeout_seconds or self.config.timeout_seconds
+        retries = route.retries if route.retries is not None else self.config.retries
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": _messages_with_images(messages, images),
             "api_key": api_key,
-            "timeout": self.config.timeout_seconds,
+            "timeout": timeout_seconds,
+            # LiteLLM/OpenAI defaults may retry internally. Keep retries solely
+            # in this audited wrapper so one configured attempt is one request.
+            "num_retries": 0,
             "stream": stream,
         }
         if provider.base_url:
@@ -86,13 +105,15 @@ class LLMClient:
         if route.max_tokens:
             kwargs["max_tokens"] = route.max_tokens
         last_error: Exception | None = None
-        for attempt in range(self.config.retries + 1):
+        for attempt in range(retries + 1):
             started = time.perf_counter()
             try:
                 response = self.completion(**kwargs)
             except Exception as exc:
                 last_error = exc
-                if attempt < self.config.retries:
+                latency_ms = round((time.perf_counter() - started) * 1000)
+                self._log_failure(task, model, exc, latency_ms)
+                if attempt < retries:
                     self.sleeper(2**attempt)
                     continue
                 break
@@ -104,9 +125,10 @@ class LLMClient:
                     f"LLM task {task!r} succeeded but llm_calls logging failed: {exc!r}"
                 ) from exc
             return response
+        safe_error = redact_sensitive_text(repr(last_error), [api_key])
         raise LLMCallError(
-            f"LLM task {task!r} failed after {self.config.retries + 1} attempts: "
-            f"{last_error!r}"
+            f"LLM task {task!r} failed after {retries + 1} attempts: "
+            f"{safe_error}"
         ) from last_error
 
     def _log_success(
@@ -121,13 +143,38 @@ class LLMClient:
             model=model,
             tokens_in=_int_value(usage, "prompt_tokens", "input_tokens"),
             tokens_out=_int_value(usage, "completion_tokens", "output_tokens"),
-            cache_read_tokens=_int_value(
-                usage, "cache_read_input_tokens", "cache_read_tokens"
-            ),
+            cache_read_tokens=_cache_read_tokens(usage),
             cost=_float_value(hidden, "response_cost", "cost"),
             latency_ms=latency_ms,
+            status="success",
+            error=None,
             created_at=datetime.now(UTC).isoformat(),
         )
+        self._write_log(record)
+
+    def _log_failure(
+        self, task: str, model: str, error: BaseException, latency_ms: int
+    ) -> None:
+        if self.session_factory is None:
+            return
+        safe_error = self.safe_error(error)
+        record = LLMCall(
+            task=task,
+            model=model,
+            tokens_in=None,
+            tokens_out=None,
+            cache_read_tokens=None,
+            cost=None,
+            latency_ms=latency_ms,
+            status="timeout" if _is_timeout(error) else "error",
+            error=safe_error,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        self._write_log(record)
+
+    def _write_log(self, record: LLMCall) -> None:
+        if self.session_factory is None:
+            return
         session = self.session_factory()
         try:
             session.add(record)
@@ -199,3 +246,35 @@ def _float_value(value: Any, *keys: str) -> float | None:
         if isinstance(found, (int, float)):
             return float(found)
     return None
+
+
+def _cache_read_tokens(usage: Any) -> int | None:
+    direct = _int_value(usage, "cache_read_input_tokens", "cache_read_tokens")
+    if direct is not None:
+        return direct
+    prompt_details = _value(usage, "prompt_tokens_details")
+    return _int_value(prompt_details, "cached_tokens") if prompt_details else None
+
+
+_AUTHORIZATION = re.compile(
+    r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;\"']+"
+)
+_KEY_VALUE = re.compile(
+    r"(?i)((?:api[_-]?key|token)\s*[:=]\s*)[^\s,;\"']+"
+)
+
+
+def redact_sensitive_text(value: str, secrets: Sequence[str] = ()) -> str:
+    """Remove configured secrets and common auth fields from persisted errors."""
+
+    redacted = value
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    redacted = _AUTHORIZATION.sub(r"\1[REDACTED]", redacted)
+    return _KEY_VALUE.sub(r"\1[REDACTED]", redacted)
+
+
+def _is_timeout(error: BaseException) -> bool:
+    value = f"{type(error).__name__} {error}".casefold()
+    return "timeout" in value or "timed out" in value

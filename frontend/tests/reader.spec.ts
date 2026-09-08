@@ -17,6 +17,11 @@ test("real ResNet reader renders and synchronizes without console errors", async
   await expect(page.locator(".block-card").first()).toContainText("Deep Residual Learning");
 
   const firstRightBlock = page.locator('.block-card[data-order-idx="0"]');
+  await expect(firstRightBlock.locator(".translated-content")).toContainText(
+    "用于图像识别的深度残差学习",
+  );
+  await expect(firstRightBlock.locator(".state-done")).toBeVisible();
+  await expect(firstRightBlock.getByText("查看英文原文")).toBeVisible();
   await firstRightBlock.hover();
   await expect(page.locator('.bbox-box[data-order-idx="0"]')).toHaveClass(/is-hovered/);
 
@@ -43,8 +48,11 @@ test("real ResNet reader renders and synchronizes without console errors", async
   }
 
   await expectPairedBbox(7);
+  await expect(page.locator('.block-card[data-order-idx="7"] .translated-content')).toContainText(
+    "残差学习框架",
+  );
 
-  await firstRightBlock.click();
+  await page.locator(".block-list-shell").click({ position: { x: 300, y: 300 } });
   async function seekBlock(orderIdx: number) {
     const target = page.locator(`.block-card[data-order-idx="${orderIdx}"]`);
     await page.locator(".block-list-shell").hover();
@@ -75,6 +83,21 @@ test("real ResNet reader renders and synchronizes without console errors", async
   await expect(tableCard.locator("table, img")).toHaveCount(0);
   await expectPairedBbox(67);
 
+  await seekBlock(14);
+  const repairedCard = page.locator('.block-card[data-order-idx="14"]');
+  await expect(repairedCard.locator(".state-done")).toBeVisible();
+  await expect(repairedCard.locator(".translated-content")).toContainText("梯度消失/爆炸");
+  await expect(repairedCard.locator(".retry-button")).toHaveCount(0);
+
+  for (const orderIdx of [5, 13, 17, 18]) {
+    await seekBlock(orderIdx);
+    const skippedCard = page.locator(`.block-card[data-order-idx="${orderIdx}"]`);
+    await expect(skippedCard.locator(".state-skipped")).toBeVisible();
+    await expect(skippedCard.locator(".english-fallback")).toBeVisible();
+    await expect(skippedCard.locator(".translation-skip")).toBeVisible();
+    await expect(skippedCard.locator(".retry-button")).toHaveCount(0);
+  }
+
   await seekBlock(160);
   await expect
     .poll(async () => page.locator('.pdf-page-shell[data-page-number="12"] .bbox-box').count())
@@ -93,5 +116,40 @@ test("real ResNet reader renders and synchronizes without console errors", async
     )
     .toBeLessThanOrEqual(5);
 
+  expect(errors).toEqual([]);
+});
+
+test("fake S3 stream replaces English with Chinese and keeps source fallback", async ({ page }) => {
+  const blockId = `${PAPER_ID}:0`;
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await page.route(`**/api/papers/${PAPER_ID}/translations`, async (route) => {
+    await route.fulfill({ json: [] });
+  });
+  await page.route(`**/api/papers/${PAPER_ID}/translate`, async (route) => {
+    await route.fulfill({
+      status: 202,
+      json: { run_id: "fake-run", paper_id: PAPER_ID, total: 1, states: { [blockId]: "queued" } },
+    });
+  });
+  await page.route(`**/api/papers/${PAPER_ID}/translate/stream?run_id=fake-run`, async (route) => {
+    const body = [
+      `id: 1\nevent: block\ndata: ${JSON.stringify({ block_id: blockId, status: "done", zh_text: "深度残差学习的中文测试译文" })}`,
+      `id: 2\nevent: progress\ndata: ${JSON.stringify({ run_id: "fake-run", total: 1, pending: 0, queued: 0, translating: 0, done: 1, failed: 0 })}`,
+      `id: 3\nevent: finished\ndata: ${JSON.stringify({ run_id: "fake-run", total: 1, pending: 0, queued: 0, translating: 0, done: 1, failed: 0 })}`,
+      "",
+    ].join("\n\n");
+    await route.fulfill({ status: 200, contentType: "text/event-stream", body });
+  });
+
+  await page.goto(`/?paperId=${PAPER_ID}`);
+  await page.getByRole("button", { name: "开始/继续翻译" }).click();
+  const firstCard = page.locator('.block-card[data-order-idx="0"]');
+  await expect(firstCard).toContainText("深度残差学习的中文测试译文");
+  await expect(firstCard.getByText("查看英文原文")).toBeVisible();
+  await expect(page.getByText("1/1 done · 0 failed · 0 skipped")).toBeVisible();
   expect(errors).toEqual([]);
 });

@@ -24,13 +24,13 @@ EXPECTED_TABLES = {
 EXPECTED_COLUMNS = {
     "papers": {"id", "title", "authors", "year", "pdf_path", "status", "parser", "parser_version", "error", "created_at"},
     "blocks": {"id", "paper_id", "order_idx", "page", "bbox", "type", "content_md", "confidence", "is_translatable"},
-    "translations": {"block_id", "zh_text", "glossary_version", "model", "status", "updated_at"},
+    "translations": {"block_id", "zh_text", "glossary_version", "model", "status", "error", "updated_at"},
     "glossary_terms": {"paper_id", "source", "target", "version"},
     "figures": {"id", "paper_id", "block_id", "caption_block_id", "image_path", "vision_desc", "table_html", "model", "status", "error"},
     "messages": {"id", "paper_id", "role", "content", "anchors", "confidence", "created_at"},
     "report_sections": {"paper_id", "section", "content_md", "anchors", "summary", "dialog_aware", "model", "status"},
     "proposal_cards": {"paper_id", "idx", "kind", "card_json", "status", "model", "error"},
-    "llm_calls": {"id", "task", "model", "tokens_in", "tokens_out", "cache_read_tokens", "cost", "latency_ms", "created_at"},
+    "llm_calls": {"id", "task", "model", "tokens_in", "tokens_out", "cache_read_tokens", "cost", "latency_ms", "status", "error", "created_at"},
     "meta": {"key", "value"},
 }
 
@@ -46,7 +46,7 @@ def test_schema_is_complete_idempotent_and_healthy(database):
         "status": "ok",
         "journal_mode": "wal",
         "foreign_keys": True,
-        "schema_version": "1",
+        "schema_version": "3",
     }
     assert health["sqlite_vec"]["status"] == "ok"
     assert health["sqlite_vec"]["version"] == "v0.1.6"
@@ -64,6 +64,57 @@ def test_vector_tables_have_partition_keys(database):
         )
     assert "paper_id TEXT partition key" in definitions["vec_blocks"]
     assert "paper_id TEXT partition key" in definitions["vec_figures"]
+
+
+def test_schema_v1_is_upgraded_with_translation_error_column(tmp_path):
+    database = Database(tmp_path / "v1.db")
+    database.initialize()
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE translations RENAME TO translations_v2")
+        connection.exec_driver_sql(
+            "CREATE TABLE translations ("
+            "block_id TEXT PRIMARY KEY, zh_text TEXT NOT NULL, "
+            "glossary_version INTEGER NOT NULL, model TEXT NOT NULL, "
+            "status TEXT NOT NULL, updated_at TEXT)"
+        )
+        connection.exec_driver_sql("DROP TABLE translations_v2")
+        connection.exec_driver_sql(
+            "UPDATE meta SET value='1' WHERE key='schema_version'"
+        )
+
+    database.initialize()
+
+    assert {
+        column["name"]
+        for column in inspect(database.engine).get_columns("translations")
+    } >= {"error"}
+    assert database.health()["database"]["schema_version"] == "3"
+
+
+def test_schema_v2_is_upgraded_with_llm_failure_audit_columns(tmp_path):
+    database = Database(tmp_path / "v2.db")
+    database.initialize()
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE llm_calls RENAME TO llm_calls_v3")
+        connection.exec_driver_sql(
+            "CREATE TABLE llm_calls ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, model TEXT, "
+            "tokens_in INTEGER, tokens_out INTEGER, cache_read_tokens INTEGER, "
+            "cost FLOAT, latency_ms INTEGER, created_at TEXT)"
+        )
+        connection.exec_driver_sql("DROP TABLE llm_calls_v3")
+        connection.exec_driver_sql(
+            "UPDATE meta SET value='2' WHERE key='schema_version'"
+        )
+
+    database.initialize()
+
+    columns = {
+        column["name"]
+        for column in inspect(database.engine).get_columns("llm_calls")
+    }
+    assert {"status", "error"} <= columns
+    assert database.health()["database"]["schema_version"] == "3"
 
 
 def test_orphaned_parsing_is_recovered(database):

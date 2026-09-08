@@ -94,6 +94,27 @@ select {
   font-size: 0.78rem;
 }
 
+.translation-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.translate-button,
+.retry-button {
+  border: 0;
+  border-radius: 0.55rem;
+  background: #2f6fc5;
+  color: white;
+  cursor: pointer;
+  padding: 0.48rem 0.75rem;
+}
+
+.translate-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .reader-grid {
   display: grid;
   min-height: 0;
@@ -221,6 +242,44 @@ select {
   font-weight: 650;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.translation-state {
+  margin-left: auto;
+}
+
+.state-done { color: #23804b; }
+.state-failed { color: #b43830; }
+.state-translating { color: #296abb; }
+.state-queued { color: #8a681c; }
+
+.translated-content {
+  color: #18243a;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+}
+
+.english-fallback {
+  opacity: 0.82;
+}
+
+.source-fallback {
+  margin-top: 0.65rem;
+  color: #68758b;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+}
+
+.translation-error {
+  max-width: 360px;
+  margin-top: 0.45rem;
+  color: #a2352e;
+  font-size: 0.72rem;
+}
+
+.retry-button {
+  margin-top: 0.55rem;
+  background: #aa433b;
+  font-size: 0.75rem;
 }
 
 .block-content {

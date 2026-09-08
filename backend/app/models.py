@@ -47,6 +47,7 @@ class Translation(Base):
     glossary_version: Mapped[int] = mapped_column(Integer, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[str | None] = mapped_column(Text)
 
 
@@ -122,6 +123,8 @@ class LLMCall(Base):
     cache_read_tokens: Mapped[int | None] = mapped_column(Integer)
     cost: Mapped[float | None] = mapped_column(Float)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str | None] = mapped_column(Text)
 
 

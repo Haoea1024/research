@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -17,14 +19,19 @@ from app.parsing.base import ParserProcessError
 from conftest import FakeParser
 
 
-def _client(tmp_path: Path, parser: FakeParser):
+def _client(tmp_path: Path, parser: FakeParser, llm_client=None):
     settings = Settings(
         database=DatabaseConfig(path=tmp_path / "api.db"),
         parser=ParserConfig(command=sys.executable, output_dir=tmp_path / "parsed"),
         storage=StorageConfig(upload_dir=tmp_path / "uploads"),
     )
     database = Database(settings.database.path)
-    app = create_app(settings=settings, database=database, parser=parser)
+    app = create_app(
+        settings=settings,
+        database=database,
+        parser=parser,
+        llm_client=llm_client,
+    )
     return TestClient(app), database
 
 
@@ -161,3 +168,87 @@ def test_table_body_without_caption_is_not_reported_as_caption(
         )
         assert table_response["caption_text"] is None
         assert table_response["diagnostics"] == []
+
+
+class _ApiFakeLLM:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def model_for_task(self, task: str) -> str:
+        return f"fake/{task}"
+
+    def call(self, task: str, messages):
+        self.calls.append(task)
+        if task == "glossary":
+            payload = {"terms": [{"source": "network", "target": "网络"}]}
+        else:
+            prompt = messages[-1]["content"]
+            marker = "Local blocks:\n" if "Local blocks:\n" in prompt else "Blocks:\n"
+            blocks = json.loads(prompt.split(marker, 1)[1])
+            payload = {
+                "translations": [
+                    {"block_id": block["block_id"], "zh_text": "这是通过接口生成的中文译文"}
+                    for block in blocks
+                    if not block["context_only"]
+                ]
+            }
+        return {"choices": [{"message": {"content": json.dumps(payload, ensure_ascii=False)}}]}
+
+
+def test_s3_fake_translation_api_and_sse(tmp_path, parsed_result):
+    llm = _ApiFakeLLM()
+    client, _ = _client(tmp_path, FakeParser(parsed_result), llm)
+    with client:
+        upload = client.post(
+            "/api/papers",
+            files={"file": ("paper.pdf", b"%PDF-1.5\nfixture", "application/pdf")},
+        )
+        paper_id = upload.json()["paper_id"]
+        blocks = client.get(f"/api/papers/{paper_id}/blocks").json()
+        target_ids = [block["id"] for block in blocks if block["is_translatable"]][:2]
+        started = client.post(
+            f"/api/papers/{paper_id}/translate",
+            json={"pages": [1], "block_ids": target_ids},
+        )
+        assert started.status_code == 202
+        run_id = started.json()["run_id"]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            snapshot = client.get(f"/api/papers/{paper_id}/translations").json()
+            selected = [item for item in snapshot if item["block_id"] in target_ids]
+            if selected and all(item["status"] == "done" for item in selected):
+                break
+            time.sleep(0.01)
+        assert all(item["zh_text"] for item in selected)
+        stream = client.get(
+            f"/api/papers/{paper_id}/translate/stream",
+            params={"run_id": run_id},
+        )
+        assert stream.status_code == 200
+        assert "event: block" in stream.text
+        assert "event: progress" in stream.text
+        assert "event: finished" in stream.text
+        glossary = client.get(f"/api/papers/{paper_id}/glossary").json()
+        assert glossary == [{"source": "network", "target": "网络", "version": 1}]
+        csv_response = client.get(
+            f"/api/papers/{paper_id}/glossary", params={"format": "csv"}
+        )
+        assert csv_response.content.startswith(b"\xef\xbb\xbf")
+        assert client.post(
+            f"/api/papers/{paper_id}/viewport",
+            json={"visible_block_ids": target_ids},
+        ).status_code == 204
+
+
+def test_s3_scope_rejects_foreign_block(tmp_path, parsed_result):
+    client, _ = _client(tmp_path, FakeParser(parsed_result), _ApiFakeLLM())
+    with client:
+        upload = client.post(
+            "/api/papers",
+            files={"file": ("paper.pdf", b"%PDF-1.5\nfixture", "application/pdf")},
+        )
+        paper_id = upload.json()["paper_id"]
+        response = client.post(
+            f"/api/papers/{paper_id}/translate", json={"block_ids": ["foreign"]}
+        )
+        assert response.status_code == 422

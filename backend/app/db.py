@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from .models import Base, Meta
 
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "3"
 VECTOR_DDL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS vec_blocks USING vec0("
     "block_id TEXT PRIMARY KEY, paper_id TEXT partition key, embedding float[1024])",
@@ -74,14 +74,48 @@ class Database:
             current = connection.execute(
                 text("SELECT value FROM meta WHERE key='schema_version'")
             ).scalar_one_or_none()
+            if current not in (None, "1", "2", SCHEMA_VERSION):
+                raise RuntimeError(
+                    f"unsupported schema version {current}; expected 1, 2, or {SCHEMA_VERSION}"
+                )
+            translation_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(translations)"
+                ).all()
+            }
+            if "error" not in translation_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE translations ADD COLUMN error TEXT"
+                )
+            llm_call_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(llm_calls)"
+                ).all()
+            }
+            if "status" not in llm_call_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE llm_calls ADD COLUMN status TEXT"
+                )
+            if "error" not in llm_call_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE llm_calls ADD COLUMN error TEXT"
+                )
+            connection.exec_driver_sql(
+                "UPDATE llm_calls SET status='success' WHERE status IS NULL"
+            )
             if current is None:
                 connection.execute(
                     text("INSERT INTO meta(key, value) VALUES ('schema_version', :version)"),
                     {"version": SCHEMA_VERSION},
                 )
-            elif current != SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"unsupported schema version {current}; expected {SCHEMA_VERSION}"
+            elif current in ("1", "2"):
+                connection.execute(
+                    text(
+                        "UPDATE meta SET value=:version WHERE key='schema_version'"
+                    ),
+                    {"version": SCHEMA_VERSION},
                 )
         if self.vector_health.status == "ok":
             self.vector_schema_error = None
