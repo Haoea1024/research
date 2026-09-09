@@ -93,6 +93,9 @@ class TranslationResponse(BaseModel):
     cached: bool = False
     retranslate_failed: bool = False
     skip_reason: str | None = None
+    source_hash: str | None = None
+    provider: str | None = None
+    route: str | None = None
 
 
 class TranslateRequest(BaseModel):

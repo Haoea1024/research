@@ -28,6 +28,7 @@ llm:
 glossary:
   max_source_chars: 14000
 translation:
+  strategy: llm
   batch_size: 4
   next_screen_blocks: 12
   chinese_ratio_threshold: 0.4

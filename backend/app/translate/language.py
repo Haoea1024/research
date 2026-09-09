@@ -24,7 +24,7 @@ def chinese_character_ratio(text: str) -> float:
     return chinese / denominator if denominator else 0.0
 
 
-def _protected_proper_nouns(source: str) -> list[str]:
+def protected_proper_nouns(source: str) -> list[str]:
     """Return stable technical/proper-name tokens that may remain in English."""
     tokens: list[str] = []
     for match in _LATIN_TOKEN.finditer(source):
@@ -48,7 +48,7 @@ def translation_language_ratio(block: Block, translated: str) -> float:
     """
     source = block.content_md or ""
     cleaned = translated
-    protected = _protected_proper_nouns(source)
+    protected = protected_proper_nouns(source)
     preserved = 0
     for token in protected:
         pattern = re.compile(rf"(?<![A-Za-z0-9-]){re.escape(token)}(?![A-Za-z0-9-])", re.IGNORECASE)

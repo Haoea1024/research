@@ -433,3 +433,16 @@ S3 获批的 fake/mock 全链路已完成，没有真实 LLM 调用。按约定�
 - 随后执行普通全文 submit，仅验证缓存/skip：121 done、15 skipped，新增 glossary、translate 和 HTTP attempt 均为 0。
 - 最终 Chrome 回归覆盖 Page 1 Abstract、Page 4 Figure 3、inline KaTeX、`<sup>`、short-title/proper-noun 与五个 timeout recovery Block；Layout/Structured 状态一致，Reader 打开 translate POST 0，console error 0，page exception 0。
 - S3.5 / S3.5.1 用户最终验收通过。本阶段未接入免费翻译 API、未进入 S4。
+
+## 2026-09-09 — S3.6A Hybrid Translation Infrastructure（fake/mock only）
+
+- 从稳定 main `1c31f04832870ec221836a36cc3704e551bd4386` 创建本地分支 `s3.6-hybrid-translation`；未调用真实 LLM/Translation API，未选择具体低成本 provider，未进入 S4，未 commit/push。
+- 新增厂商无关 `TranslationProvider` Protocol、`FakeTranslationProvider` 和 `TranslationRouter`。`translation.strategy` 默认 `llm`，原 S3 路径保持兼容；hybrid 仅在显式配置并注入 adapter 时启用。
+- bulk provider 成功候选按 Block 做 mapping/placeholder 检查，再进入与 LLM 共用的最终 validator；有效 sibling 独立落库。质量失败只在显式 block/ratio/estimated-cost budget 内 fallback 单 Block，未配置 budget 时默认关闭。availability failure 只做 provider 自身有限重试，随后打开进程内 circuit 并发送 Run-level error，不触发 Pro fallback storm。
+- request-scoped placeholder 保护 LaTeX、数字 citation、author-year citation、URL、email 与安全 `<sup>`；缺失、重复、未知或 restore 后残留均拒绝。glossary/proper noun 策略分为 `preserve_literal / force_target / validate_only`，普通 glossary 默认 validate-only。
+- SQLite schema version 升至 4：Translation 增加 `source_hash/provider/route/validation_json`；历史 Translation 由当前 Block `content_md` 确定性回填 source hash。仅 source hash 变化使缓存 stale，glossary/provider/model 改变不会令普通 submit 刷新 done/failed。
+- 新增 `translation_provider_calls` 审计非 LLM provider HTTP attempt；`llm_calls` 增加 run/entity/route/attempt/provider 关联。LLM fallback 只写 `llm_calls`，不重复计入 provider audit；actual cost 与 estimated cost 分列。
+- 新增只读 benchmark seam：输入 source Block 与只读 V4-Pro baseline，返回可序列化 candidate artifact；不接受 Session、不写 `translations`、不调用 `/retranslate`。Caption 表/API/SSE/UI 均未实现，完整留到 S3.6C。
+- fake/mock 覆盖 bulk 0 LLM、单 Block 质量 fallback、有效 sibling partial commit、timeout/429/5xx 无 fallback storm、circuit、placeholder round-trip/损坏、term policy、explicit retranslate bypass、done/failed cache、source hash stale、overlap work、只读 benchmark、LLM audit context 与默认 llm 兼容。
+- 本地 `data/app.db` 已从 schema v3 幂等升级到 v4：125 条历史 Translation 全部回填非空 source hash；升级前后底层仍为 123 done/2 个被 eligibility skip 覆盖的历史 failed，中文与 error 字符汇总未变化；API eligibility 保持 121 done、0 failed、15 skipped。
+- 最终回归：后端 86 passed（2 条既有第三方弃用告警）、前端 11 files/36 tests、production build、`pip check`、`git diff --check` 和 diff secret scan 均通过。默认配置解析为 `strategy=llm`、无 bulk provider、无 fallback budget；未发生任何真实外部调用。

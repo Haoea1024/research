@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .models import Base, Meta
+from .provenance import translation_source_hash
 
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 VECTOR_DDL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS vec_blocks USING vec0("
     "block_id TEXT PRIMARY KEY, paper_id TEXT partition key, embedding float[1024])",
@@ -74,9 +75,9 @@ class Database:
             current = connection.execute(
                 text("SELECT value FROM meta WHERE key='schema_version'")
             ).scalar_one_or_none()
-            if current not in (None, "1", "2", SCHEMA_VERSION):
+            if current not in (None, "1", "2", "3", SCHEMA_VERSION):
                 raise RuntimeError(
-                    f"unsupported schema version {current}; expected 1, 2, or {SCHEMA_VERSION}"
+                    f"unsupported schema version {current}; expected 1, 2, 3, or {SCHEMA_VERSION}"
                 )
             translation_columns = {
                 row[1]
@@ -102,6 +103,31 @@ class Database:
                 connection.exec_driver_sql(
                     "ALTER TABLE llm_calls ADD COLUMN error TEXT"
                 )
+            for column, ddl in (
+                ("run_id", "TEXT"),
+                ("entity_ids", "TEXT"),
+                ("route", "TEXT"),
+                ("attempt", "INTEGER"),
+                ("provider", "TEXT"),
+            ):
+                if column not in llm_call_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE llm_calls ADD COLUMN {column} {ddl}"
+                    )
+            for column in ("source_hash", "provider", "route", "validation_json"):
+                if column not in translation_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE translations ADD COLUMN {column} TEXT"
+                    )
+            rows = connection.exec_driver_sql(
+                "SELECT t.block_id, b.content_md FROM translations t "
+                "JOIN blocks b ON b.id=t.block_id WHERE t.source_hash IS NULL"
+            ).all()
+            for block_id, content_md in rows:
+                connection.exec_driver_sql(
+                    "UPDATE translations SET source_hash=? WHERE block_id=?",
+                    (translation_source_hash(content_md), block_id),
+                )
             connection.exec_driver_sql(
                 "UPDATE llm_calls SET status='success' WHERE status IS NULL"
             )
@@ -110,7 +136,7 @@ class Database:
                     text("INSERT INTO meta(key, value) VALUES ('schema_version', :version)"),
                     {"version": SCHEMA_VERSION},
                 )
-            elif current in ("1", "2"):
+            elif current in ("1", "2", "3"):
                 connection.execute(
                     text(
                         "UPDATE meta SET value=:version WHERE key='schema_version'"

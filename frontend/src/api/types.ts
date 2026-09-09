@@ -64,6 +64,9 @@ export interface Translation {
   cached: boolean;
   retranslate_failed?: boolean;
   skip_reason?: string | null;
+  source_hash?: string | null;
+  provider?: string | null;
+  route?: string | null;
 }
 
 export interface TranslateRun {

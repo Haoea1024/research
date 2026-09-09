@@ -45,6 +45,8 @@ S3 翻译流水线：术语表(CSV)→分块→缓存→SSE，视口优先队列
 S3.5 版式翻译 Reader：右侧默认切换为“中文版式页”，
      由 bbox/页/列关系复刻版式骨架 + 中文局部 reflow；保留 structured 视图
      + Figure/Table 原位展示 + 共享 anchor 导航                    ← 里程碑：像论文一样读
+S3.6 Hybrid Translation：A 建 provider/router、保护/共享校验、审计与只读 benchmark seam；
+     B 单独批准真实低成本 provider A/B；C 再做 keyed by figure_id 的 caption translation
 S4A 本地 embedding 入库 + sqlite-vec + parser-derived Figure/Table Card
     + parser_table_json + 安全图片端点 + fake vision pipeline
 S4B 真实视觉模型验收：Figure/Table vision description / vision table data

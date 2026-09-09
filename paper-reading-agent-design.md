@@ -137,6 +137,8 @@ type
 2. 按 block 分批翻译，携带术语表 + 前后文窗口，学术语体，保留专有名词英文原文（首次出现给“中文（English）”格式）；
 3. 翻译结果缓存入库，流式返回；右侧中文版式页只订阅 Translation 状态，不改变翻译业务语义；
 4. 用户可对任一块显式“重译”；重译只刷新该 Block 的 Translation，不自动修改论文级术语表。
+5. S3.6 hybrid 路径把批量候选生成抽象为厂商无关 `TranslationProvider`：候选先做 LaTeX/citation/URL/email/`<sup>` placeholder 完整性和 ID mapping 校验，再进入与 LLM 共用的最终 validator。候选质量失败只按 Block、在明确预算内 fallback；provider timeout/限流/鉴权/额度/网络故障只做有限重试并使 Run 显式失败，不触发付费 fallback storm。默认仍走原 LLM 路径。
+6. S3.6B 的真实 provider A/B 不覆盖生产 Translation；读取现有 V4-Pro 译文作为只读 baseline，候选保存为独立实验 artifact。Figure/Table caption translation 留到 S3.6C，以 `figure_id` 独立持久化，不能伪造 Block 或 bbox，anchor 仍走 `figure_id → block_id`。
 
 ---
 

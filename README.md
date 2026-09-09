@@ -1,6 +1,6 @@
 # Paper Reading Agent
 
-> S3.5.1 最终状态（2026-09-09）：版式阅读器及 correctness fixes 已通过自动化、真实 ResNet Chrome 和用户人工验收；默认为“左侧原始 PDF + 右侧中文版式阅读页”，结构化 Block 流保留为辅助视图。S3.5 已完成，尚未进入 S4。
+> 当前开发状态（2026-09-09）：S3.5.1 已稳定验收；S3.6A Hybrid Translation Infrastructure 已完成本地 fake/mock 实现与回归，尚未选择或调用真实 bulk TranslationProvider，也未进入 S4。
 
 面向计算机视觉论文的本地文献研读 Agent。项目目标是把 PDF 解析、双语阅读、结构化精读、证据定位和问答串成一条可验证的工作流。
 
@@ -27,6 +27,9 @@
 - 翻译只处理 `is_translatable=1` Block，按局部连续块常规 batch 4，并携带前后各 1 Block、标题和命中术语子集。
 - 单 worker `heapq + asyncio.Condition` 队列支持单块重译、当前 viewport、下一屏、scope 与全文优先级；重叠 Run 订阅同一 Block work item。
 - SQLite `translations` 是 done/failed 权威缓存；SSE 提供 block/progress/error/finished 实时事件和断线重连快照。
+- S3.6A 增加厂商无关 `TranslationProvider`/`TranslationRouter`：默认仍为 `translation.strategy=llm`；显式 hybrid 时先走 bulk provider，候选质量失败只对该 Block 做受预算约束的 LLM fallback，provider 可用性失败则有限重试、打开 circuit 并使 Run 显式失败，禁止付费 fallback storm。
+- LaTeX、citation、URL、email 与安全 `<sup>` 使用 request-scoped placeholder 做可逆保护；proper noun/glossary 采用 `preserve_literal / force_target / validate_only` 策略并统一进入共享最终校验。
+- Translation 缓存增加源文 hash 与 provider/route/validation provenance；只有源文变化使旧结果 stale，glossary/provider/model 变化不会让普通 submit 自动刷新成功缓存。非 LLM attempt 与 LLM fallback 分表审计，避免重复计费。
 - 中文字符比例阈值为 0.4；漂移时只重译该 Block 一次，仍失败则保存原始诊断并显示英文 fallback。
 - 右栏按原 `block.id` 展示 pending/queued/translating/done/failed/skipped；done 优先中文，英文原文可展开，失败可单块重译，空白和元数据类 Block 明确跳过。
 
@@ -129,6 +132,9 @@ S3.5 新增 `GET /api/figures/{figure_id}/image`：仅按 Figure ID 读取数据
 | S2 | pdf.js 对照阅读器骨架与同步滚动 | 已验收并 push |
 | S3 | 翻译流水线、缓存、SSE 与阅读器交互 | **COMPLETE** |
 | S3.5 | 中文版式阅读页、结构化辅助视图、block-id 同步与 correctness fixes | **COMPLETE** |
+| S3.6A | Hybrid provider 抽象、保护/校验、fallback guard、审计与 benchmark seam | **COMPLETE（fake/mock）** |
+| S3.6B | 真实低成本 provider 研究与只读 A/B benchmark | 未开始 |
+| S3.6C | Figure/Table caption 独立翻译与 hybrid acceptance | 未开始 |
 | S4 | Embedding 入库与图表卡片流水线 | 未开始 |
 | S5 | RAG 问答、证据锚定、跳转与划选提问 | 未开始 |
 | S6 | 八段精读、对话感知与三层改进方向 | 未开始 |

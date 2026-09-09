@@ -6,7 +6,7 @@ from typing import Any, Sequence, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .client import LLMClient, response_text
+from .client import LLMCallContext, LLMClient, response_text
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -21,11 +21,13 @@ def call_structured(
     task: str,
     schema: type[SchemaT],
     messages: Sequence[dict[str, Any]],
+    *,
+    audit_context: LLMCallContext | None = None,
 ) -> SchemaT:
     current_messages = list(messages)
     last_error: ValidationError | None = None
     for validation_attempt in range(2):
-        response = client.call(task, current_messages)
+        response = client.call(task, current_messages, audit_context=audit_context)
         raw_text = response_text(response)
         try:
             return schema.model_validate_json(raw_text)

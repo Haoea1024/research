@@ -1,6 +1,6 @@
 # CLAUDE.md — 工作约定（任何会话开始先读这里）
 
-> 当前开发状态：S3.5 / S3.5.1 已通过自动化、真实 ResNet Chrome 和用户人工验收；分支为 `s3.5-layout-reader`，当前仅允许按用户授权创建并 push S3.5 checkpoint，不得进入 S4。
+> 当前开发状态：S3.5 / S3.5.1 已稳定合入 main；当前分支 `s3.6-hybrid-translation` 正在完成 S3.6A Hybrid Translation Infrastructure。只允许 fake/mock，不得调用真实 LLM/Translation API、进入 S4 或 commit/push，除非用户另行授权。
 
 ## 0. 必读文档
 
@@ -21,6 +21,7 @@
 - S2 已由用户验收通过，S0-S2 checkpoint `07c2693` 已 push 到 `origin/main`。
 - S3 Translation 已完成最终 fake/mock 与真实验收：Paratera `DeepSeek-V4-Pro-0813` glossary 40 项已持久化，ResNet 第 1 页最终为 13 done、4 skipped、0 failed，同范围复验 0 次新 LLM 调用；Chrome 双向同步/hover 通过且 console/page exception 为 0。未经新授权不得继续真实调用、调用 Flash 或进入 S4。
 - S3.5 / S3.5.1 已完成：最终 ResNet API eligibility 为 121 done、0 failed、15 skipped；全文幂等复验产生 0 次 glossary、translate 和 HTTP 调用。Abstract、Figure 3 mixed-column、inline KaTeX、`<sup>` 与 Reader 零自动翻译调用均通过 Chrome 回归。
+- S3.6A 已实现厂商无关 provider/router、request-scoped token protection、共享最终校验、按 Block 质量 fallback、provider outage circuit/run failure、source hash cache provenance、provider/LLM 业务审计及只读 benchmark seam；默认 strategy 仍为 llm。真实 provider 选择和 A/B 留到 S3.6B，caption 表/API/UI 留到 S3.6C。
 - 不得提前实现 Embedding、RAG、问答、Figure Card、视觉模型、报告或其他 S4-S6 业务。
 
 ## 2. S1 已批准范围
@@ -53,7 +54,7 @@ S2 禁止真实翻译、glossary、SSE、viewport priority queue、Embedding、R
 - 常规 batch size 4，优先连续/邻近 Block；附带前后各一块上下文、论文标题和命中 glossary 子集。
 - Run 与 Block work item 分离；重叠 Run 订阅同一真实任务，完成后各自 progress/finished。
 - 单 worker、`heapq`、`asyncio.Condition` 与 generation lazy invalidation；优先级为重译 -1、当前 viewport 0、下一屏 1、scope 2、全文 3。
-- SQLite done/failed 缓存与幂等续跑；翻译表保留 `error TEXT`，`llm_calls` 增加 `status/error` 失败审计，schema version 3，无 Alembic。
+- SQLite done/failed 缓存与幂等续跑；翻译表保留 `error TEXT` 并增加 source/provider/route/validation provenance，`llm_calls` 增加业务关联字段，非 LLM provider attempt 使用独立审计表；schema version 4，无 Alembic。
 - 中文字符比例阈值 0.4，忽略数字、标点、空白和 LaTeX 控制命令；漂移只单块自动重译一次。
 - SSE 至少包含 block/progress/error/finished，使用有限 ring buffer；断线不取消 worker，重连先恢复权威快照再订阅事件。
 - Reader 保持原 `block.id` 同步身份，增加中文优先、英文 fallback、五态展示与单块重译入口；未重写 PdfPane/SyncController。

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -49,11 +49,36 @@ class LLMConfig(BaseModel):
     tasks: dict[str, TaskRoute] = Field(default_factory=dict)
 
 
+class TranslationProviderConfig(BaseModel):
+    type: str
+    model: str | None = None
+    api_key_env: str | None = None
+    base_url: str | None = None
+    timeout_seconds: int = Field(default=30, ge=1)
+    retries: int = Field(default=0, ge=0, le=1)
+    max_batch_size: int = Field(default=20, ge=1)
+    max_concurrency: int = Field(default=1, ge=1)
+    min_request_interval_ms: int = Field(default=0, ge=0)
+    circuit_reset_seconds: int = Field(default=30, ge=1)
+
+
+class FallbackGuardConfig(BaseModel):
+    max_blocks: int | None = Field(default=None, ge=0)
+    max_ratio: float | None = Field(default=None, ge=0, le=1)
+    estimated_cost_limit: float | None = Field(default=None, ge=0)
+    estimated_cost_per_block: float | None = Field(default=None, ge=0)
+
+
 class TranslationConfig(BaseModel):
     batch_size: int = Field(default=4, ge=3, le=5)
     next_screen_blocks: int = Field(default=12, ge=1)
     chinese_ratio_threshold: float = Field(default=0.4, gt=0, le=1)
     event_buffer_size: int = Field(default=256, ge=16)
+    strategy: Literal["llm", "hybrid"] = "llm"
+    bulk_provider: str | None = None
+    providers: dict[str, TranslationProviderConfig] = Field(default_factory=dict)
+    fallback: FallbackGuardConfig = Field(default_factory=FallbackGuardConfig)
+    term_policies: dict[str, Literal["preserve_literal", "force_target", "validate_only"]] = Field(default_factory=dict)
 
 
 class GlossaryConfig(BaseModel):

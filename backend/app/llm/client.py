@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Sequence
 
@@ -28,6 +30,13 @@ class LLMNotConfiguredError(LLMError):
 
 class LLMCallError(LLMError):
     pass
+
+
+@dataclass(frozen=True)
+class LLMCallContext:
+    run_id: str | None = None
+    entity_ids: tuple[str, ...] = ()
+    route: str | None = None
 
 
 class LLMClient:
@@ -58,6 +67,12 @@ class LLMClient:
             )
         return route.model if "/" in route.model else f"{route.provider}/{route.model}"
 
+    def provider_for_task(self, task: str) -> str:
+        route = self.config.tasks.get(task)
+        if route is None:
+            raise UnknownTaskError(f"unknown LLM task: {task}")
+        return route.provider
+
     def safe_error(self, error: BaseException) -> str:
         secrets = [
             os.getenv(provider.api_key_env, "")
@@ -72,6 +87,7 @@ class LLMClient:
         *,
         images: Sequence[str] | None = None,
         stream: bool = False,
+        audit_context: LLMCallContext | None = None,
     ) -> Any:
         route = self.config.tasks.get(task)
         if route is None:
@@ -112,14 +128,18 @@ class LLMClient:
             except Exception as exc:
                 last_error = exc
                 latency_ms = round((time.perf_counter() - started) * 1000)
-                self._log_failure(task, model, exc, latency_ms)
+                self._log_failure(
+                    task, model, route.provider, exc, latency_ms, attempt + 1, audit_context
+                )
                 if attempt < retries:
                     self.sleeper(2**attempt)
                     continue
                 break
             latency_ms = round((time.perf_counter() - started) * 1000)
             try:
-                self._log_success(task, model, response, latency_ms)
+                self._log_success(
+                    task, model, route.provider, response, latency_ms, attempt + 1, audit_context
+                )
             except Exception as exc:
                 raise LLMCallError(
                     f"LLM task {task!r} succeeded but llm_calls logging failed: {exc!r}"
@@ -132,7 +152,14 @@ class LLMClient:
         ) from last_error
 
     def _log_success(
-        self, task: str, model: str, response: Any, latency_ms: int
+        self,
+        task: str,
+        model: str,
+        provider: str,
+        response: Any,
+        latency_ms: int,
+        attempt: int,
+        context: LLMCallContext | None,
     ) -> None:
         if self.session_factory is None:
             return
@@ -149,11 +176,23 @@ class LLMClient:
             status="success",
             error=None,
             created_at=datetime.now(UTC).isoformat(),
+            run_id=context.run_id if context else None,
+            entity_ids=json.dumps(context.entity_ids) if context and context.entity_ids else None,
+            route=context.route if context else None,
+            attempt=attempt,
+            provider=provider,
         )
         self._write_log(record)
 
     def _log_failure(
-        self, task: str, model: str, error: BaseException, latency_ms: int
+        self,
+        task: str,
+        model: str,
+        provider: str,
+        error: BaseException,
+        latency_ms: int,
+        attempt: int,
+        context: LLMCallContext | None,
     ) -> None:
         if self.session_factory is None:
             return
@@ -169,6 +208,11 @@ class LLMClient:
             status="timeout" if _is_timeout(error) else "error",
             error=safe_error,
             created_at=datetime.now(UTC).isoformat(),
+            run_id=context.run_id if context else None,
+            entity_ids=json.dumps(context.entity_ids) if context and context.entity_ids else None,
+            route=context.route if context else None,
+            attempt=attempt,
+            provider=provider,
         )
         self._write_log(record)
 

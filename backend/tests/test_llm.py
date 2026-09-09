@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.config import LLMConfig, ProviderConfig, TaskRoute
 from app.llm.client import (
+    LLMCallContext,
     LLMCallError,
     LLMClient,
     LLMNotConfiguredError,
@@ -81,6 +82,29 @@ def test_retry_once_and_log_success(monkeypatch, database):
         assert record.tokens_in == 3
         assert record.tokens_out == 2
         assert record.cost == 0.01
+
+
+def test_llm_audit_records_business_context(monkeypatch, database):
+    monkeypatch.setenv("TEST_LLM_KEY", "not-a-real-key")
+    client = LLMClient(
+        _config(),
+        completion=lambda **kwargs: _response('{"value": 7}'),
+        session_factory=database.SessionLocal,
+    )
+    client.call(
+        "test",
+        [{"role": "user", "content": "x"}],
+        audit_context=LLMCallContext(
+            run_id="run-1", entity_ids=("b1", "b2"), route="fallback"
+        ),
+    )
+    with database.session() as session:
+        record = session.scalars(select(LLMCall)).one()
+        assert record.run_id == "run-1"
+        assert record.entity_ids == '["b1", "b2"]'
+        assert record.route == "fallback"
+        assert record.attempt == 1
+        assert record.provider == "fake"
 
 
 def test_task_route_overrides_timeout_and_retry(monkeypatch):

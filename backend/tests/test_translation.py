@@ -9,12 +9,16 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from app.config import TranslationConfig
-from app.models import Block, GlossaryTerm, Paper, Translation
+from app.config import FallbackGuardConfig, TranslationConfig, TranslationProviderConfig
+from app.models import Block, GlossaryTerm, Paper, Translation, TranslationProviderCall
+from app.provenance import translation_source_hash
 from app.translate.glossary import GlossaryService
 from app.translate.content import translation_skip_reason
 from app.translate.language import chinese_character_ratio, translation_language_ratio
 from app.translate.pipeline import TranslationManager, TranslationScopeError
+from app.translate.benchmark import run_candidate_benchmark
+from app.translate.protection import TermDirective, protect_text
+from app.translate.providers import FakeTranslationProvider, ProviderAvailabilityError, ProviderItemResult
 
 
 class FakeLLM:
@@ -31,7 +35,8 @@ class FakeLLM:
     def model_for_task(self, task: str) -> str:
         return f"fake/{task}"
 
-    def call(self, task: str, messages: list[dict]):
+    def call(self, task: str, messages: list[dict], **kwargs):
+        del kwargs
         with self._lock:
             self.calls.append((task, messages))
         if self.delay:
@@ -50,7 +55,8 @@ class FakeLLM:
         for item in targets:
             attempts = self._translate_attempts.get(item["block_id"], 0)
             self._translate_attempts[item["block_id"]] = attempts + 1
-            value = "English only" if self.always_drift or (self.drift and attempts == 0) else f"这是中文译文 {item['block_id']}"
+            source_number = item["content"].rsplit(" ", 1)[-1]
+            value = "English only" if self.always_drift or (self.drift and attempts == 0) else f"这是残差中文译文 {source_number}"
             translations.append({"block_id": item["block_id"], "zh_text": value})
         return response({"translations": translations})
 
@@ -60,7 +66,8 @@ class PartialFailureLLM(FakeLLM):
         super().__init__()
         self.translate_calls = 0
 
-    def call(self, task: str, messages: list[dict]):
+    def call(self, task: str, messages: list[dict], **kwargs):
+        del kwargs
         if task == "glossary":
             return super().call(task, messages)
         self.calls.append((task, messages))
@@ -78,7 +85,7 @@ class PartialFailureLLM(FakeLLM):
                 "translations": [
                     {
                         "block_id": item["block_id"],
-                        "zh_text": "有效中文译文" if index == 0 else "",
+                        "zh_text": f"有效残差中文译文 {item['content'].rsplit(' ', 1)[-1]}" if index == 0 else "",
                     }
                     for index, item in enumerate(targets)
                 ]
@@ -340,7 +347,10 @@ def test_empty_block_is_skipped_without_translation_row(database) -> None:
             "glossary_version": None,
             "updated_at": None,
             "cached": False,
-            "skip_reason": "EMPTY_CONTENT",
+                "skip_reason": "EMPTY_CONTENT",
+                "source_hash": None,
+                "provider": None,
+                "route": None,
         }
         assert any(
             event.event == "progress" and event.data.get("skipped") == 1
@@ -406,7 +416,7 @@ def test_partial_batch_failure_commits_valid_sibling_only(database) -> None:
         valid = session.get(Translation, "b0")
         invalid = session.get(Translation, "b1")
         assert valid.status == "done"
-        assert valid.zh_text == "有效中文译文"
+        assert valid.zh_text == "有效残差中文译文 0"
         assert valid.error is None
         assert invalid.status == "failed"
         assert invalid.zh_text == ""
@@ -424,6 +434,7 @@ def test_failed_cache_requires_explicit_retranslate(database) -> None:
                 model="fake/old",
                 status="failed",
                 error="old failure",
+                source_hash=translation_source_hash("residual source 0"),
             )
         )
     llm = FakeLLM()
@@ -657,3 +668,413 @@ def test_failed_retranslate_preserves_previous_success(database) -> None:
         assert row.zh_text == "旧的成功译文"
         assert row.error is None
     assert "glossary" not in [task for task, _ in llm.calls]
+
+
+def hybrid_config(*, retries: int = 0, max_fallback_blocks: int | None = None) -> TranslationConfig:
+    return TranslationConfig(
+        strategy="hybrid",
+        bulk_provider="fake",
+        providers={
+            "fake": TranslationProviderConfig(
+                type="fake", model="fake-translation", retries=retries
+            )
+        },
+        fallback=FallbackGuardConfig(max_blocks=max_fallback_blocks),
+    )
+
+
+def valid_provider_text(item) -> str:
+    return item.text.replace("residual source", "残差内容")
+
+
+def seed_glossary(database, paper_id: str) -> None:
+    with database.session() as session:
+        session.add(
+            GlossaryTerm(
+                paper_id=paper_id, source="residual", target="残差", version=1
+            )
+        )
+
+
+def test_hybrid_bulk_success_uses_zero_llm_calls(database) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+    llm = FakeLLM()
+    provider = FakeTranslationProvider(valid_provider_text)
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0", "b1"])
+        await wait_finished(run)
+        await manager.close()
+        assert run.states == {"b0": "done", "b1": "done"}
+
+    asyncio.run(scenario())
+    assert llm.calls == []
+    assert len(provider.calls) == 1
+    with database.session() as session:
+        rows = session.scalars(select(Translation).order_by(Translation.block_id)).all()
+        assert {row.route for row in rows} == {"bulk"}
+        audit = session.scalars(select(TranslationProviderCall)).one()
+        assert audit.status == "success"
+        assert audit.attempt == 1
+
+
+def test_hybrid_quality_failure_falls_back_only_failed_block(database) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+    llm = FakeLLM()
+
+    def transform(item):
+        if item.item_id == "b1":
+            return ProviderItemResult(item_id="b1", translated_text="")
+        return valid_provider_text(item)
+
+    provider = FakeTranslationProvider(transform)
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        hybrid_config(max_fallback_blocks=1),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0", "b1"])
+        await wait_finished(run)
+        await manager.close()
+        assert run.states == {"b0": "done", "b1": "done"}
+
+    asyncio.run(scenario())
+    assert [task for task, _ in llm.calls] == ["translate"]
+    with database.session() as session:
+        assert session.get(Translation, "b0").route == "bulk"
+        assert session.get(Translation, "b1").route == "fallback"
+
+
+def test_hybrid_quality_failure_preserves_valid_sibling_without_fallback(database) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+
+    def transform(item):
+        if item.item_id == "b1":
+            return ProviderItemResult(item_id="b1", translated_text="")
+        return valid_provider_text(item)
+
+    provider = FakeTranslationProvider(transform)
+    llm = FakeLLM()
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        hybrid_config(max_fallback_blocks=0),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0", "b1"])
+        await wait_finished(run)
+        await manager.close()
+        assert run.states == {"b0": "done", "b1": "failed"}
+
+    asyncio.run(scenario())
+    assert llm.calls == []
+    with database.session() as session:
+        assert session.get(Translation, "b0").route == "bulk"
+        failed = session.get(Translation, "b1")
+        assert failed.status == "failed"
+        assert "FALLBACK_GUARD_EXHAUSTED" in failed.error
+
+
+def test_hybrid_quality_fallback_is_disabled_until_budget_is_configured(database) -> None:
+    paper, _ = seed(database, 1)
+    seed_glossary(database, paper.id)
+    provider = FakeTranslationProvider(
+        lambda item: ProviderItemResult(item_id=item.item_id, translated_text="")
+    )
+    llm = FakeLLM()
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0"])
+        await wait_finished(run)
+        await manager.close()
+        assert run.states == {"b0": "failed"}
+
+    asyncio.run(scenario())
+    assert llm.calls == []
+
+
+@pytest.mark.parametrize("code", ["timeout", "rate_limited", "server_error"])
+def test_hybrid_availability_failure_never_causes_pro_fallback_storm(database, code) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+    llm = FakeLLM()
+    provider = FakeTranslationProvider(
+        errors=[
+            ProviderAvailabilityError(code, "provider unavailable", retryable=True),
+            ProviderAvailabilityError(code, "provider unavailable", retryable=True),
+        ]
+    )
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        hybrid_config(retries=1),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0", "b1", "b2", "b3"])
+        await wait_finished(run)
+        await manager.close()
+        assert run.status == "failed"
+        assert run.error_code == "TRANSLATION_PROVIDER_UNAVAILABLE"
+        assert set(run.states.values()) == {"pending"}
+
+    asyncio.run(scenario())
+    assert len(provider.calls) == 2
+    assert llm.calls == []
+    with database.session() as session:
+        assert session.scalars(select(Translation)).all() == []
+        assert len(session.scalars(select(TranslationProviderCall)).all()) == 2
+
+
+def test_provider_circuit_rejects_followup_run_without_http_attempt(database) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+    provider = FakeTranslationProvider(
+        errors=[ProviderAvailabilityError("network", "offline", retryable=True)]
+    )
+    manager = TranslationManager(
+        database.SessionLocal,
+        FakeLLM(),
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        first = await manager.submit(paper.id, block_ids=["b0"])
+        await wait_finished(first)
+        second = await manager.submit(paper.id, block_ids=["b1"])
+        await wait_finished(second)
+        await manager.close()
+        assert first.error_code == "TRANSLATION_PROVIDER_UNAVAILABLE"
+        assert second.error_code == "TRANSLATION_PROVIDER_UNAVAILABLE"
+
+    asyncio.run(scenario())
+    assert len(provider.calls) == 1
+    with database.session() as session:
+        assert len(session.scalars(select(TranslationProviderCall)).all()) == 1
+
+
+def test_provider_token_protection_round_trip_and_damage_detection() -> None:
+    source = (
+        r"Use $\\mathcal{H}(x)$ [12] from https://example.com and a@example.com"
+        "<sup>1</sup>."
+    )
+    protected = protect_text(source, request_scope="ABCDEF12")
+    assert len(protected.tokens) == 5
+    restored, errors = protected.restore("中文：" + protected.text)
+    assert errors == ()
+    assert restored == "中文：" + source
+
+    missing, errors = protected.restore(protected.text.replace(protected.tokens[0].placeholder, ""))
+    assert missing is None and "count=0" in errors[0]
+    duplicate, errors = protected.restore(protected.text + protected.tokens[0].placeholder)
+    assert duplicate is None and "count=2" in errors[0]
+    unknown, errors = protected.restore(protected.text + "__PA_DEADBEEF_9999__")
+    assert unknown is None and any("unknown" in error for error in errors)
+
+
+def test_glossary_term_policies_are_distinct() -> None:
+    protected = protect_text(
+        "ResNet uses Residual Learning and ImageNet",
+        request_scope="1234ABCD",
+        terms=[
+            TermDirective("ResNet", "ResNet", "preserve_literal"),
+            TermDirective("Residual Learning", "残差学习", "force_target"),
+            TermDirective("ImageNet", "ImageNet", "validate_only"),
+        ],
+    )
+    assert len(protected.tokens) == 2
+    restored, errors = protected.restore(protected.text)
+    assert errors == ()
+    assert restored == "ResNet uses 残差学习 and ImageNet"
+    assert "ImageNet" in protected.text
+
+
+def test_hybrid_explicit_retranslate_bypasses_bulk_provider(database) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+    provider = FakeTranslationProvider(valid_provider_text)
+    llm = FakeLLM()
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.retranslate("b0")
+        await wait_finished(run)
+        await manager.close()
+        assert run.states == {"b0": "done"}
+
+    asyncio.run(scenario())
+    assert provider.calls == []
+    assert [task for task, _ in llm.calls] == ["translate"]
+
+
+def test_hybrid_existing_done_and_failed_are_terminal_cache(database) -> None:
+    paper, _ = seed(database)
+    source_hash = translation_source_hash("residual source 0")
+    with database.session() as session:
+        session.add_all([
+            Translation(block_id="b0", zh_text="已有译文", glossary_version=1, model="old", status="done", source_hash=source_hash),
+            Translation(block_id="b1", zh_text="", glossary_version=1, model="old", status="failed", source_hash=translation_source_hash("residual source 1")),
+        ])
+    provider = FakeTranslationProvider(valid_provider_text)
+    manager = TranslationManager(
+        database.SessionLocal,
+        FakeLLM(),
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        run = await manager.submit(paper.id, block_ids=["b0", "b1"])
+        assert run.finished
+        assert run.states == {"b0": "done", "b1": "failed"}
+
+    asyncio.run(scenario())
+    assert provider.calls == []
+
+
+def test_source_hash_change_invalidates_terminal_cache(database) -> None:
+    paper, _ = seed(database, 1)
+    seed_glossary(database, paper.id)
+    with database.session() as session:
+        session.add(
+            Translation(
+                block_id="b0",
+                zh_text="旧译文",
+                glossary_version=1,
+                model="old",
+                status="done",
+                source_hash=translation_source_hash("different source"),
+            )
+        )
+    provider = FakeTranslationProvider(valid_provider_text)
+    manager = TranslationManager(
+        database.SessionLocal,
+        FakeLLM(),
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0"])
+        await wait_finished(run)
+        await manager.close()
+        assert run.states == {"b0": "done"}
+
+    asyncio.run(scenario())
+    assert len(provider.calls) == 1
+    with database.session() as session:
+        row = session.get(Translation, "b0")
+        assert row.zh_text != "旧译文"
+        assert row.source_hash == translation_source_hash("residual source 0")
+
+
+def test_default_llm_strategy_does_not_invoke_injected_provider(database) -> None:
+    paper, _ = seed(database, 1)
+    provider = FakeTranslationProvider(valid_provider_text)
+    llm = FakeLLM()
+    manager = TranslationManager(
+        database.SessionLocal,
+        llm,
+        TranslationConfig(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        run = await manager.submit(paper.id, block_ids=["b0"])
+        await wait_finished(run)
+        await manager.close()
+
+    asyncio.run(scenario())
+    assert provider.calls == []
+    assert [task for task, _ in llm.calls] == ["glossary", "translate"]
+
+
+def test_hybrid_overlapping_runs_share_one_provider_work_item(database) -> None:
+    paper, _ = seed(database)
+    seed_glossary(database, paper.id)
+    provider = FakeTranslationProvider(valid_provider_text)
+    manager = TranslationManager(
+        database.SessionLocal,
+        FakeLLM(),
+        hybrid_config(),
+        translation_provider=provider,
+    )
+
+    async def scenario():
+        await manager.start()
+        first, second = await asyncio.gather(
+            manager.submit(paper.id, block_ids=["b0", "b1"]),
+            manager.submit(paper.id, block_ids=["b0", "b1"]),
+        )
+        await wait_finished(first)
+        await wait_finished(second)
+        await manager.close()
+
+    asyncio.run(scenario())
+    assert len(provider.calls) == 1
+
+
+def test_benchmark_candidate_is_read_only(database) -> None:
+    _, blocks = seed(database, 1)
+    baseline = Translation(
+        block_id="b0",
+        zh_text="现有基线",
+        glossary_version=1,
+        model="pro",
+        status="done",
+        source_hash=translation_source_hash(blocks[0].content_md),
+    )
+    with database.session() as session:
+        session.add(baseline)
+    provider = FakeTranslationProvider(valid_provider_text)
+
+    artifact = asyncio.run(
+        run_candidate_benchmark(
+            provider,
+            blocks,
+            {"b0": baseline},
+            threshold=0.4,
+            timeout_seconds=10,
+            terms_by_block={"b0": [TermDirective("residual", "残差")]},
+        )
+    )
+    assert artifact.candidates[0].baseline_zh == "现有基线"
+    assert artifact.candidates[0].candidate_zh != "现有基线"
+    with database.session() as session:
+        assert session.get(Translation, "b0").zh_text == "现有基线"

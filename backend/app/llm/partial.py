@@ -8,7 +8,7 @@ from typing import Any, Sequence
 
 from pydantic import ValidationError
 
-from .client import LLMClient, response_text
+from .client import LLMCallContext, LLMClient, response_text
 from .schemas import TranslationEntry
 
 
@@ -24,8 +24,10 @@ def call_partial_translations(
     task: str,
     expected_ids: set[str],
     messages: Sequence[dict[str, Any]],
+    *,
+    audit_context: LLMCallContext | None = None,
 ) -> PartialTranslationResult:
-    response = client.call(task, messages)
+    response = client.call(task, messages, audit_context=audit_context)
     raw_text = response_text(response)
     values, errors = _validate_translation_payload(raw_text, expected_ids)
     invalid_ids = expected_ids - values.keys()
@@ -48,7 +50,9 @@ def call_partial_translations(
         ]
     )
     try:
-        corrected_response = client.call(task, correction_messages)
+        corrected_response = client.call(
+            task, correction_messages, audit_context=audit_context
+        )
         corrected_text = response_text(corrected_response)
         corrected, corrected_errors = _validate_translation_payload(
             corrected_text, invalid_ids

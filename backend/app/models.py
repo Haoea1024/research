@@ -49,6 +49,10 @@ class Translation(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[str | None] = mapped_column(Text)
+    source_hash: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(Text)
+    route: Mapped[str | None] = mapped_column(Text)
+    validation_json: Mapped[str | None] = mapped_column(Text)
 
 
 class GlossaryTerm(Base):
@@ -124,6 +128,34 @@ class LLMCall(Base):
     cost: Mapped[float | None] = mapped_column(Float)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str | None] = mapped_column(Text)
+    run_id: Mapped[str | None] = mapped_column(Text)
+    entity_ids: Mapped[str | None] = mapped_column(Text)
+    route: Mapped[str | None] = mapped_column(Text)
+    attempt: Mapped[int | None] = mapped_column(Integer)
+    provider: Mapped[str | None] = mapped_column(Text)
+
+
+class TranslationProviderCall(Base):
+    __tablename__ = "translation_provider_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str | None] = mapped_column(Text)
+    entity_ids: Mapped[str | None] = mapped_column(Text)
+    route: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    attempt: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str | None] = mapped_column(Text)
+    chars_in: Mapped[int | None] = mapped_column(Integer)
+    chars_out: Mapped[int | None] = mapped_column(Integer)
+    billed_chars: Mapped[int | None] = mapped_column(Integer)
+    cost: Mapped[float | None] = mapped_column(Float)
+    estimated_cost: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(Text)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    request_id: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str | None] = mapped_column(Text)
 

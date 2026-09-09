@@ -17,6 +17,7 @@ from .parsing.mineru_client import MinerUCLIParser
 from .llm import LLMClient
 from .services.papers import PaperService
 from .translate.pipeline import TranslationManager
+from .translate.providers import TranslationProvider
 
 
 def create_app(
@@ -26,6 +27,7 @@ def create_app(
     parser: Parser | None = None,
     llm_client: LLMClient | None = None,
     translation_manager: TranslationManager | None = None,
+    translation_provider: TranslationProvider | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     database = database or Database(settings.database.path)
@@ -44,6 +46,7 @@ def create_app(
         llm_client,
         settings.translation,
         glossary_config=settings.glossary,
+        translation_provider=translation_provider,
     )
 
     @asynccontextmanager
@@ -57,7 +60,7 @@ def create_app(
         finally:
             await translation_manager.close()
 
-    app = FastAPI(title="Paper Reading Agent", version="0.3.5-s3.5", lifespan=lifespan)
+    app = FastAPI(title="Paper Reading Agent", version="0.3.6-s3.6a", lifespan=lifespan)
     app.state.settings = settings
     app.state.database = database
     app.state.paper_service = service

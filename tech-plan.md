@@ -96,7 +96,10 @@ CREATE TABLE translations (
   glossary_version INTEGER NOT NULL,
   model TEXT NOT NULL,
   status TEXT NOT NULL,           -- done|failed
-  updated_at TEXT
+  error TEXT, updated_at TEXT,
+  source_hash TEXT,               -- normalized content_md SHA-256；仅源文变化使缓存 stale
+  provider TEXT, route TEXT,      -- llm|bulk|fallback|explicit_retranslate provenance
+  validation_json TEXT
 );
 CREATE TABLE glossary_terms (
   paper_id TEXT, source TEXT, target TEXT, version INTEGER,
@@ -136,7 +139,17 @@ CREATE TABLE llm_calls (          -- 成本日志（§5.2 落点）
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task TEXT, model TEXT,
   tokens_in INTEGER, tokens_out INTEGER, cache_read_tokens INTEGER,
-  cost REAL, latency_ms INTEGER, created_at TEXT
+  cost REAL, latency_ms INTEGER, status TEXT, error TEXT,
+  run_id TEXT, entity_ids TEXT, route TEXT, attempt INTEGER, provider TEXT,
+  created_at TEXT
+);
+CREATE TABLE translation_provider_calls ( -- 非 LLM provider 的每次 HTTP attempt；LLM fallback 不重复写入
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT, entity_ids TEXT, route TEXT, provider TEXT, model TEXT,
+  attempt INTEGER, status TEXT,
+  chars_in INTEGER, chars_out INTEGER, billed_chars INTEGER,
+  cost REAL, estimated_cost REAL, currency TEXT,
+  latency_ms INTEGER, request_id TEXT, error TEXT, created_at TEXT
 );
 -- 向量：sqlite-vec 虚表，embedding 维度 1024 (bge-m3)
 -- paper_id 必须是 partition key：否则 KNN 作用于全库所有论文，多篇入库后
@@ -210,6 +223,10 @@ event: finished     data: {}
 - **幂等**：`done` 与 `failed` 都是普通 `submit()` 的持久缓存终态；普通范围重交不自动重试 failed。只有显式 `/retranslate` 才重新收费。旧成功重译采用“成功后替换、失败保留旧译文”的安全语义。
 - **调用重试**：LiteLLM/OpenAI client 内部 `num_retries=0`，只保留项目层可审计的 task-level timeout/retry；glossary 与 translate 可有独立配置。
 - **SSE**：`block/progress/error/finished`；Run-level glossary failure 使用全局 error，不伪装成 Block 翻译失败；SQLite 是 done/failed/skipped 的权威状态，SSE 只是实时层。
+- **S3.6A hybrid 基础设施**：`TranslationProvider` Protocol 位于 translate provider adapter 边界，业务 pipeline 只依赖 `TranslationRouter`。默认 `translation.strategy=llm` 完全沿用 S3；显式 hybrid 时 bulk candidate 先做 placeholder/mapping 校验，再进入与 LLM 共用的最终 validator。质量失败只允许失败 Block 在显式 fallback block/ratio/cost budget 内走 LLM；未配置预算时 fallback 默认关闭。timeout/429/5xx/auth/quota/network 属于 availability failure，只做 provider 自身有限重试，随后打开内存 circuit 并使 Run 显式失败，绝不自动把整批切到付费 LLM。
+- **保护与术语策略**：LaTeX、citation、URL、email、白名单 `<sup>` 用 request-scoped placeholder，必须无缺失/重复/未知/残留后才 restore。术语为 `preserve_literal / force_target / validate_only`；普通 glossary 默认 validate-only，不把全部术语机械占位。
+- **缓存与 provenance**：Translation 写入 normalized source hash、provider、route 与 validation 摘要。源文 hash 改变时旧缓存 stale；glossary version、provider 或 model 改变都不会令普通 submit 自动刷新 done/failed，只有显式 retranslate/future refresh 可替换，且继续保护旧成功结果。schema v4 初始化对历史行确定性回填 source hash。
+- **审计与 benchmark**：非 LLM provider 每个 HTTP attempt 写 `translation_provider_calls`；LLM 调用只写 `llm_calls`，二者均关联 run/entity/route/attempt/provider，actual cost 与 estimated cost 分列。S3.6B benchmark harness 只读现有 V4-Pro baseline，候选只输出 JSON artifact，禁止写 `translations` 或调用 `/retranslate`。
 
 ### 5.4 图表卡片（S4A/S4B，详情层而非排版层）
 

@@ -213,7 +213,8 @@ class _ApiFakeLLM:
     def model_for_task(self, task: str) -> str:
         return f"fake/{task}"
 
-    def call(self, task: str, messages):
+    def call(self, task: str, messages, **kwargs):
+        del kwargs
         self.calls.append(task)
         if task == "glossary":
             payload = {"terms": [{"source": "network", "target": "网络"}]}
@@ -223,7 +224,7 @@ class _ApiFakeLLM:
             blocks = json.loads(prompt.split(marker, 1)[1])
             payload = {
                 "translations": [
-                    {"block_id": block["block_id"], "zh_text": "这是通过接口生成的中文译文"}
+                    {"block_id": block["block_id"], "zh_text": "这是通过接口生成的网络中文译文"}
                     for block in blocks
                     if not block["context_only"]
                 ]
