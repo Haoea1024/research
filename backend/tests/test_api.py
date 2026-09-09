@@ -53,6 +53,8 @@ def test_upload_query_blocks_figures_and_health(tmp_path, parsed_result):
         assert figures[0]["caption_text"].startswith("Figure 1")
         assert figures[0]["caption_block_id"] is None
         assert figures[0]["diagnostics"] == ["CAPTION_WITHOUT_DISTINCT_BBOX"]
+        assert figures[0]["image_url"].startswith("/api/figures/")
+        assert "image_path" not in figures[0]
         assert figures[1]["caption_text"].startswith("Table 1")
         assert figures[1]["caption_block_id"].endswith(":4")
         assert client.get("/api/papers").json()[0]["id"] == paper_id
@@ -104,6 +106,40 @@ def test_pdf_endpoint_reports_missing_database_file(tmp_path, parsed_result):
         response = client.get("/api/papers/missing-file/pdf")
         assert response.status_code == 404
         assert response.json()["detail"] == "paper PDF is missing from local storage"
+
+
+def test_figure_image_endpoint_is_id_based_and_confined_to_parser_output(
+    tmp_path, parsed_result
+):
+    client, database = _client(tmp_path, FakeParser(parsed_result))
+    with client:
+        upload = client.post(
+            "/api/papers",
+            files={"file": ("paper.pdf", b"%PDF-1.5\nfixture", "application/pdf")},
+        )
+        paper_id = upload.json()["paper_id"]
+        figures = client.get(f"/api/papers/{paper_id}/figures").json()
+        figure_id = figures[0]["id"]
+        image = tmp_path / "parsed" / "paper" / "figure.jpg"
+        image.parent.mkdir(parents=True)
+        image.write_bytes(b"fake-jpeg")
+
+        from app.models import Figure
+
+        with database.session() as session:
+            session.get(Figure, figure_id).image_path = str(image)
+        fetched = client.get(f"/api/figures/{figure_id}/image")
+        assert fetched.status_code == 200
+        assert fetched.content == b"fake-jpeg"
+        assert fetched.headers["content-type"] == "image/jpeg"
+
+        outside = tmp_path / "outside.jpg"
+        outside.write_bytes(b"private")
+        with database.session() as session:
+            session.get(Figure, figure_id).image_path = str(outside)
+        rejected = client.get(f"/api/figures/{figure_id}/image")
+        assert rejected.status_code == 404
+        assert rejected.content != b"private"
 
 
 def test_failed_upload_can_retry_but_parsed_cannot(tmp_path, parsed_result):

@@ -2,14 +2,13 @@ import { useCallback, useMemo, useRef } from "react";
 
 import type { Block } from "../api/types";
 import { useReaderStore, type SyncOrigin } from "../stores/readerStore";
-import type { BlockPaneHandle } from "./BlockPane";
-import type { PageReadyHandle } from "./types";
+import type { PageReadyHandle, TranslationPaneHandle } from "./types";
 
 type Pane = Exclude<SyncOrigin, null>;
 
 export function useSyncController(blocks: Block[]) {
   const pdfPaneRef = useRef<PageReadyHandle>(null);
-  const blockPaneRef = useRef<BlockPaneHandle>(null);
+  const blockPaneRef = useRef<TranslationPaneHandle>(null);
   const activeByPane = useRef<Record<Pane, string | null>>({ pdf: null, blocks: null });
   const blockById = useMemo(
     () => new Map(blocks.map((block) => [block.id, block])),
@@ -44,8 +43,10 @@ export function useSyncController(blocks: Block[]) {
       }
 
       if (origin === "pdf") {
-        const accepted = blockPaneRef.current?.scrollToBlock(blockId) ?? false;
-        if (!accepted) useReaderStore.getState().finishSync(generation);
+        const accepted = blockPaneRef.current?.scrollToBlock(blockId, generation) ?? false;
+        void Promise.resolve(accepted).then((value) => {
+          if (!value) useReaderStore.getState().finishSync(generation);
+        });
         return;
       }
 
@@ -68,9 +69,12 @@ export function useSyncController(blocks: Block[]) {
   return {
     pdfPaneRef,
     blockPaneRef,
+    translationPaneRef: blockPaneRef,
     onPdfActiveBlock: (blockId: string) => handleActiveBlock("pdf", blockId),
     onBlocksActiveBlock: (blockId: string) => handleActiveBlock("blocks", blockId),
+    onTranslationActiveBlock: (blockId: string) => handleActiveBlock("blocks", blockId),
     onPdfUserIntent: () => handleUserIntent("pdf"),
     onBlocksUserIntent: () => handleUserIntent("blocks"),
+    onTranslationUserIntent: () => handleUserIntent("blocks"),
   };
 }

@@ -1,5 +1,7 @@
 # CLAUDE.md — 工作约定（任何会话开始先读这里）
 
+> 当前开发状态：S3.5 / S3.5.1 已通过自动化、真实 ResNet Chrome 和用户人工验收；分支为 `s3.5-layout-reader`，当前仅允许按用户授权创建并 push S3.5 checkpoint，不得进入 S4。
+
 ## 0. 必读文档
 
 开始工作前按以下顺序完整阅读：
@@ -18,6 +20,7 @@
 - S1 已由用户验收通过。
 - S2 已由用户验收通过，S0-S2 checkpoint `07c2693` 已 push 到 `origin/main`。
 - S3 Translation 已完成最终 fake/mock 与真实验收：Paratera `DeepSeek-V4-Pro-0813` glossary 40 项已持久化，ResNet 第 1 页最终为 13 done、4 skipped、0 failed，同范围复验 0 次新 LLM 调用；Chrome 双向同步/hover 通过且 console/page exception 为 0。未经新授权不得继续真实调用、调用 Flash 或进入 S4。
+- S3.5 / S3.5.1 已完成：最终 ResNet API eligibility 为 121 done、0 failed、15 skipped；全文幂等复验产生 0 次 glossary、translate 和 HTTP 调用。Abstract、Figure 3 mixed-column、inline KaTeX、`<sup>` 与 Reader 零自动翻译调用均通过 Chrome 回归。
 - 不得提前实现 Embedding、RAG、问答、Figure Card、视觉模型、报告或其他 S4-S6 业务。
 
 ## 2. S1 已批准范围
@@ -58,6 +61,18 @@ S2 禁止真实翻译、glossary、SSE、viewport priority queue、Embedding、R
 - glossary 在每个 Run 建立 Block work item 前只准备一次；失败时 Run fail-fast、Block 保持 pending。输入上限 14,000 字符，ResNet 候选输入实测 5,507 字符；glossary 为 180 秒/0 transport retry，translate 为 60 秒/1 retry。
 
 ## 3. 固定实现裁定
+
+### S3.5 Reader 裁定
+
+- 默认视图是 `PDF + LayoutTranslationView`，`StructuredBlockView` 必须保留为辅助/调试视图；两者共享原始 `block.id`、翻译状态和同步控制，不复制业务状态。
+- 页面列、full-width、media row、confidence 和 diagnostics 都是 parser `page/bbox/type/order_idx` 的确定性前端派生，不持久化、不成为 anchor，也不调用 LLM。
+- bbox 不可靠时优先 `fallback-flow`。中文允许在列内自然 reflow 和延长页面，禁止写回 PDF、强塞原 bbox、裁切或重叠译文。
+- Figure/Table 正文流仅使用 ID-based 安全图片端点和 parser caption；不得注入 raw `table_html`。表格确定性结构化留到 S4A。
+- 双栏证据可包含稳定落在单列、不跨 gutter 的 Figure/Table；左右列必须独立 reflow。marginalia 必须同时满足靠边、高窄及与正文列低重叠，`title` 不能仅因窄 bbox 被归入边注。
+- Structured/Layout 共用 mixed-content renderer；行内数学交给 KaTeX，`<sup>` 只做安全白名单解析，其他 HTML 保持转义。
+- `REFERENCE_LIST` 与 `MALFORMED_FRAGMENT` 为确定性 skipped reason；历史 Translation 行不在 UI eligibility 读取时删除。全文翻译必须显示预计目标数并经用户明确确认。
+- Caption 翻译留到 S3.6：以 `figure_id` 为键保存 `caption_source/caption_zh/caption_model/caption_status`，anchor 仍为 `figure_id → block_id`；不得伪造独立 caption bbox。
+- Layout/Structured 切换属于本地 position restore，必须以 active `block.id` 收敛并沿用 generation/user-takeover 语义，不能触发 PDF 往返同步。
 
 - Parser 保持统一抽象：`parse(pdf_path) -> ParseResult`；业务层不得依赖 MinerU CLI 原始输出格式。
 - MinerU 使用现有 Conda `paper-agent` 环境、已有模型缓存和 Windows 原生 CPU `pipeline`；不得重复安装 MinerU、重新下载模型或调整 WSL2、Docker、CUDA、驱动和系统配置。

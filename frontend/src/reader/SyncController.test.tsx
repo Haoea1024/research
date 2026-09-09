@@ -19,7 +19,7 @@ describe("useSyncController", () => {
       scrollToBlock,
     };
     act(() => result.current.onPdfActiveBlock(block.id));
-    expect(scrollToBlock).toHaveBeenCalledWith(block.id);
+    expect(scrollToBlock).toHaveBeenCalledWith(block.id, expect.any(Number));
   });
 
   it("prevents an older asynchronous PDF jump from overriding a newer one", async () => {

@@ -22,7 +22,7 @@ from ..llm.templating import PromptRenderer
 from ..models import Block, Paper, Translation
 from .glossary import GlossaryService, GlossaryValue
 from .content import translation_skip_reason
-from .language import chinese_character_ratio
+from .language import translation_language_ratio
 
 
 class TranslationNotFoundError(LookupError):
@@ -455,11 +455,11 @@ class TranslationManager:
                 )
                 continue
             text = result.values[work.block.id]
-            ratio = chinese_character_ratio(text)
+            ratio = translation_language_ratio(work.block, text)
             if ratio < self.config.chinese_ratio_threshold:
                 try:
                     text = await self._retry_drift(paper, blocks, work, glossary, text, ratio)
-                    ratio = chinese_character_ratio(text)
+                    ratio = translation_language_ratio(work.block, text)
                 except Exception as exc:
                     await self._complete_failure(
                         work, f"DRIFT_RETRY_ERROR: {self._safe_error(exc)}"

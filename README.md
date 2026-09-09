@@ -1,5 +1,7 @@
 # Paper Reading Agent
 
+> S3.5.1 最终状态（2026-09-09）：版式阅读器及 correctness fixes 已通过自动化、真实 ResNet Chrome 和用户人工验收；默认为“左侧原始 PDF + 右侧中文版式阅读页”，结构化 Block 流保留为辅助视图。S3.5 已完成，尚未进入 S4。
+
 面向计算机视觉论文的本地文献研读 Agent。项目目标是把 PDF 解析、双语阅读、结构化精读、证据定位和问答串成一条可验证的工作流。
 
 > 当前状态：**S0、S1、S2 已验收并 push；S3 Translation 已完成最终 fake/mock 与真实验收。** Paratera `DeepSeek-V4-Pro-0813` 已完成 glossary 和 ResNet 第 1 页受控翻译：40 个术语持久化缓存，第一页为 13 done、4 skipped、0 failed，同范围重复提交产生 0 次新 LLM 调用。未进入第二页、全文、Flash A/B 或 S4。
@@ -12,11 +14,15 @@
 - SQLite 普通表、sqlite-vec 自检与虚表幂等初始化；sqlite-vec 失败不会阻止基础功能启动。
 - FastAPI 论文上传、状态查询、Block/Figure 查询、失败重试和按 Paper ID 获取 PDF。
 - LiteLLM 基础设施：任务路由、60 秒超时、一次重试、错误透传、调用日志和 Pydantic 结构化校验；S3 glossary/translate prompt 使用版本化 Jinja 模板。
-- React 18 + TypeScript + Vite 阅读器，只开放 `side-by-side` 模式。
+- React 18 + TypeScript + Vite 阅读器，默认开放 `layout` 版式对照，并保留 `structured` 结构化辅助视图。
 - pdf.js 多页按需渲染；每页以唯一 `RenderTask.promise` 为就绪依据，DPR 只用于 canvas backing store。
 - bbox 按页面 CSS viewport 换算；右侧 `react-virtuoso` 按 `order_idx` 展示 165 个 Block。
 - 左右同步以 `block.id` 为唯一身份，使用 35% 参考线、generation token、目标收敛与用户主动接管防止回环；hover 与 active 状态分离。
-- Figure/Table 在 S2 仅显示 caption/文本或明确占位，不加载裁切图片，不渲染原始 `table_html`。
+- Figure/Table 在 S3.5 版式正文中通过安全 ID endpoint 显示 parser crop + caption；缺图时明确占位，始终不渲染原始 `table_html`。
+- 版式列推导同时使用正文与稳定单列 Figure/Table 作为确定性证据；marginalia 需要边缘位置、高窄形态及低正文列重叠，低置信度继续退化为普通文档流。
+- Structured/Layout 共用安全 mixed-content renderer；行内 `$...$`、`\(...\)`、`\[...\]` 由 KaTeX 渲染，`<sup>` 仅作白名单确定性解析，其他 HTML 保持转义。
+- Reference list 与明显 parser 截断片段按确定性 reason 跳过；标准英文专名可在标题中保留，不通过全局降低中文比例阈值放宽校验。
+- 全文翻译入口明确显示预计待处理 Block 数，并要求二次确认；仅打开 Reader 不会创建翻译任务。
 - 每篇论文结构化持久化 `source,target,version` glossary，可导出 UTF-8 BOM CSV；并发生成使用 per-paper async lock 双重检查。
 - 翻译只处理 `is_translatable=1` Block，按局部连续块常规 batch 4，并携带前后各 1 Block、标题和命中术语子集。
 - 单 worker `heapq + asyncio.Condition` 队列支持单块重译、当前 viewport、下一屏、scope 与全文优先级；重叠 Run 订阅同一 Block work item。
@@ -77,6 +83,8 @@ E2E 需要后端、前端正在运行，并需要 S1 已解析的 ResNet Paper �
 
 ## API
 
+S3.5 新增 `GET /api/figures/{figure_id}/image`：仅按 Figure ID 读取数据库记录，并将文件访问限制在 MinerU parser 输出目录内；Figure 列表不再向前端暴露绝对 `image_path`。
+
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/api/health` | 数据库、sqlite-vec、MinerU 和 LLM 配置状态 |
@@ -104,9 +112,9 @@ E2E 需要后端、前端正在运行，并需要 S1 已解析的 ResNet Paper �
 | 应用 Block | 165 |
 | Figure / Table | 12 / 15 |
 | PDF 页数 | 12 |
-| 后端测试 | 60 passed，2 条已接受第三方弃用告警 |
-| 前端单元/组件测试 | 25 passed |
-| Chrome E2E | 真实 S2 Reader + fake S3 SSE 共 2 passed |
+| 后端测试 | 68 passed，2 条已接受第三方弃用告警 |
+| 前端单元/组件测试 | 36 passed |
+| Chrome E2E | 真实 ResNet Layout/Structured Reader + fake S3 SSE 共 3 passed |
 | npm audit | 0 vulnerabilities |
 | production build | 通过 |
 
@@ -120,6 +128,7 @@ E2E 需要后端、前端正在运行，并需要 S1 已解析的 ResNet Paper �
 | S1 | Parser、postprocess、SQLite、FastAPI、LLM 基础封装 | 已验收 |
 | S2 | pdf.js 对照阅读器骨架与同步滚动 | 已验收并 push |
 | S3 | 翻译流水线、缓存、SSE 与阅读器交互 | **COMPLETE** |
+| S3.5 | 中文版式阅读页、结构化辅助视图、block-id 同步与 correctness fixes | **COMPLETE** |
 | S4 | Embedding 入库与图表卡片流水线 | 未开始 |
 | S5 | RAG 问答、证据锚定、跳转与划选提问 | 未开始 |
 | S6 | 八段精读、对话感知与三层改进方向 | 未开始 |
@@ -163,7 +172,7 @@ E2E 需要后端、前端正在运行，并需要 S1 已解析的 ResNet Paper �
 - `config.yaml` 已配置 Paratera OpenAI-compatible 路由；真实 key 仅从被 Git 忽略的 `.env` 中读取。当前不具备新的真实调用授权。
 - S3 Run 和 SSE ring buffer 仅在进程内；服务重启后 done/failed 缓存仍在，但原 scope 不自动恢复，需重新提交且只处理未完成 Block。
 - 当前只有单 worker，已发出的模型调用不取消；新 viewport 在当前调用结束后插队。
-- Figure/Table 仍为 S2 占位，不发送给翻译模型。
+- Figure/Table 已在 S3.5 版式正文中显示 parser crop + caption，但仍不发送给翻译模型；S4 AI Card/vision 尚未实现。
 - glossary 是 Run 级前置 gate：缺失时每 Paper 在 async lock 下至多生成一次，失败则所有 Block 保持 pending，并发送页面级可重试错误；不会逐 batch 重试。
 - glossary 输入只包含标题、摘要、章节标题及本地抽取的专名/缩写/模型模块数据集候选；`glossary.max_source_chars=14000`，按候选边界确定性截断。ResNet 实测输入为 5,507 字符。
 - glossary 使用 180 秒、0 transport retry；translate 使用 60 秒、1 次 transport retry。`llm_calls` 同时审计成功和脱敏后的 timeout/error。

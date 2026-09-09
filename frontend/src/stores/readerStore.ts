@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type ViewMode = "side-by-side" | "translation-only";
+export type ViewMode = "layout" | "structured";
 export type SyncOrigin = "pdf" | "blocks" | null;
 
 interface ReaderState {
@@ -12,6 +12,7 @@ interface ReaderState {
   syncTargetBlockId: string | null;
   setActiveBlockId: (blockId: string | null) => void;
   setHoverBlockId: (blockId: string | null) => void;
+  setViewMode: (viewMode: ViewMode) => void;
   beginSync: (origin: Exclude<SyncOrigin, null>, targetBlockId: string) => number;
   takeControl: (origin: Exclude<SyncOrigin, null>) => number;
   finishSync: (generation: number) => void;
@@ -21,7 +22,7 @@ interface ReaderState {
 const initialState = {
   activeBlockId: null,
   hoverBlockId: null,
-  viewMode: "side-by-side" as const,
+  viewMode: "layout" as const,
   syncOrigin: null,
   syncGeneration: 0,
   syncTargetBlockId: null,
@@ -31,6 +32,7 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
   ...initialState,
   setActiveBlockId: (activeBlockId) => set({ activeBlockId }),
   setHoverBlockId: (hoverBlockId) => set({ hoverBlockId }),
+  setViewMode: (viewMode) => set({ viewMode }),
   beginSync: (syncOrigin, syncTargetBlockId) => {
     const syncGeneration = get().syncGeneration + 1;
     set({ syncOrigin, syncTargetBlockId, syncGeneration });

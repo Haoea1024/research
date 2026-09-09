@@ -92,6 +92,14 @@ class PaperService:
                 session.expunge(figure)
             return figures
 
+    def get_figure(self, figure_id: str) -> Figure:
+        with self._session() as session:
+            figure = session.get(Figure, figure_id)
+            if figure is None:
+                raise PaperNotFoundError(figure_id)
+            session.expunge(figure)
+            return figure
+
     def parse_uploaded(self, paper_id: str) -> None:
         if not self._transition(paper_id, "uploaded", "parsing"):
             return

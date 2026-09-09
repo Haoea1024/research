@@ -37,7 +37,7 @@ export interface Figure {
   paper_id: string | null;
   block_id: string | null;
   caption_block_id: string | null;
-  image_path: string;
+  image_url: string | null;
   table_html: string | null;
   caption_text: string | null;
   diagnostics: string[];

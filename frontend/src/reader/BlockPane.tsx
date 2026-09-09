@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import { Virtuoso, type ListRange, type VirtuosoHandle } from "react-virtuoso";
 
 import type { Block, Figure } from "../api/types";
@@ -6,10 +6,10 @@ import { BlockCard } from "./BlockCard";
 import { ACTIVE_LINE_RATIO } from "./types";
 
 export interface BlockPaneHandle {
-  scrollToBlock(blockId: string): boolean;
+  scrollToBlock(blockId: string): boolean | Promise<boolean>;
 }
 
-interface BlockPaneProps {
+export interface BlockPaneProps {
   blocks: Block[];
   figures: Figure[];
   onActiveBlock?: (blockId: string) => void;
@@ -24,6 +24,8 @@ export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function Bl
 ) {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const lastVisibleKey = useRef("");
+  const programmaticTarget = useRef<{ id: string; index: number; resolve: (accepted: boolean) => void } | null>(null);
+  const programmaticPinnedId = useRef<string | null>(null);
   const indexById = useMemo(
     () => new Map(blocks.map((block, index) => [block.id, index])),
     [blocks],
@@ -42,15 +44,30 @@ export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function Bl
     scrollToBlock(blockId) {
       const index = indexById.get(blockId);
       if (index === undefined) return false;
+      if (!virtuosoRef.current) return false;
+      programmaticTarget.current?.resolve(false);
+      programmaticPinnedId.current = null;
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" });
-      return virtuosoRef.current !== null;
+      return new Promise<boolean>((resolve) => {
+        programmaticTarget.current = { id: blockId, index, resolve };
+      });
     },
   }));
 
   const handleRangeChanged = (range: ListRange) => {
+    const target = programmaticTarget.current;
+    if (target) {
+      if (target.index >= range.startIndex && target.index <= range.endIndex) {
+        programmaticTarget.current = null;
+        programmaticPinnedId.current = target.id;
+        onActiveBlock?.(target.id);
+        target.resolve(true);
+      }
+    } else if (!programmaticPinnedId.current) {
     const offset = Math.round((range.endIndex - range.startIndex) * ACTIVE_LINE_RATIO);
     const block = blocks[Math.min(range.endIndex, range.startIndex + offset)];
     if (block) onActiveBlock?.(block.id);
+    }
     const visibleIds = blocks
       .slice(range.startIndex, range.endIndex + 1)
       .map((item) => item.id);
@@ -61,6 +78,19 @@ export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function Bl
     }
   };
 
+  useEffect(() => () => {
+    programmaticTarget.current?.resolve(false);
+    programmaticTarget.current = null;
+    programmaticPinnedId.current = null;
+  }, []);
+
+  const handleUserIntent = () => {
+    programmaticTarget.current?.resolve(false);
+    programmaticTarget.current = null;
+    programmaticPinnedId.current = null;
+    onUserIntent?.();
+  };
+
   return (
     <section className="block-pane" aria-label="翻译块流">
       <header className="pane-header">
@@ -69,9 +99,9 @@ export const BlockPane = forwardRef<BlockPaneHandle, BlockPaneProps>(function Bl
       </header>
       <div
         className="block-list-shell"
-        onWheel={onUserIntent}
-        onPointerDown={onUserIntent}
-        onTouchStart={onUserIntent}
+        onWheel={handleUserIntent}
+        onPointerDown={handleUserIntent}
+        onTouchStart={handleUserIntent}
       >
         <Virtuoso
           ref={virtuosoRef}

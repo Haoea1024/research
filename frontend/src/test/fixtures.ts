@@ -21,7 +21,7 @@ export function makeFigure(overrides: Partial<Figure> = {}): Figure {
     paper_id: "paper",
     block_id: "paper:0",
     caption_block_id: null,
-    image_path: "C:/private/figure.jpg",
+    image_url: "/api/figures/figure%3A0/image",
     table_html: null,
     caption_text: null,
     diagnostics: [],

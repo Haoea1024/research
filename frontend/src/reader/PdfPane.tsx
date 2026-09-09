@@ -16,7 +16,7 @@ import type { Block } from "../api/types";
 import { useReaderStore } from "../stores/readerStore";
 import { closestBlockAtGuide } from "./activeBlock";
 import { PdfPage, type PdfPageHandle } from "./PdfPage";
-import { ACTIVE_LINE_RATIO, type PageReadyHandle } from "./types";
+import { ACTIVE_LINE_RATIO, type PageMetrics, type PageReadyHandle } from "./types";
 
 GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -28,10 +28,11 @@ interface PdfPaneProps {
   blocks: Block[];
   onActiveBlock?: (blockId: string) => void;
   onUserIntent?: () => void;
+  onPageMetrics?: (page: number, metrics: PageMetrics) => void;
 }
 
 export const PdfPane = forwardRef<PageReadyHandle, PdfPaneProps>(function PdfPane(
-  { pdfUrl, blocks, onActiveBlock, onUserIntent },
+  { pdfUrl, blocks, onActiveBlock, onUserIntent, onPageMetrics },
   ref,
 ) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -152,6 +153,7 @@ export const PdfPane = forwardRef<PageReadyHandle, PdfPaneProps>(function PdfPan
                   pageNumber={pageNumber}
                   blocks={blocksByPage.get(pageNumber) ?? []}
                   scrollRootRef={scrollRef}
+                  onPageMetrics={onPageMetrics}
                 />
               );
             })

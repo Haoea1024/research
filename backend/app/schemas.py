@@ -48,7 +48,7 @@ class FigureResponse(BaseModel):
     paper_id: str | None
     block_id: str | None
     caption_block_id: str | None
-    image_path: str
+    image_url: str | None
     table_html: str | None
     caption_text: str | None = None
     diagnostics: list[str] = Field(default_factory=list)

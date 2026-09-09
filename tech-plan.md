@@ -1,5 +1,7 @@
 # 文献研读 Agent — MVP 技术实施方案
 
+> **2026-09 阅读器形态修订**：S3 后新增 S3.5。默认 Reader 由“左 PDF + 右 Block 卡片流”调整为“左原 PDF + 右 HTML/CSS 中文版式页”；现有 Block 流保留为 `structured` 辅助视图。右侧只复刻版式骨架并允许中文 local reflow，不生成译文 PDF。S4 Figure/Table Card 是数据/详情层，不替代正文原位图表；S5/S6 统一通过 Block/Figure anchor 回跳版式 Reader。
+
 > 对应范围见 [mvp-plan.md](mvp-plan.md)，产品设计见 [paper-reading-agent-design.md](paper-reading-agent-design.md)。本文回答"具体怎么写代码"。
 
 ## 1. 技术栈总览
@@ -55,7 +57,7 @@ paper-agent/
 │  └─ requirements.txt
 ├─ frontend/
 │  └─ src/
-│     ├─ reader/                 # PdfPane(pdf.js+overlay) / TransPane(块流) / SyncController
+│     ├─ reader/                 # PdfPane / LayoutTransPane(中文版式页) / StructuredBlockPane / LayoutEngine / SyncController
 │     ├─ chat/                   # 问答侧栏、锚点渲染、可信度警示
 │     ├─ report/                 # 八段手风琴、提案卡、故事线
 │     ├─ stores/                 # zustand: paperStore/readerStore/chatStore
@@ -145,6 +147,10 @@ CREATE VIRTUAL TABLE vec_figures USING vec0(figure_id TEXT PRIMARY KEY, paper_id
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);  -- embedding_model / schema_version ...
 ```
 
+**S3.5 布局数据不新增业务主表**：中文版式页的 `column / layout_group / x_ratio / width_ratio / span` 由 `blocks.page + bbox + order_idx + type` 在前端/确定性 layout service 中派生，不作为新的事实源持久化。这样布局算法可迭代，而 Block/Translation/Anchor 身份不迁移。
+
+S4 起图表 provenance 必须分层：现有 MinerU `caption/image_path/table_html/page/bbox` 永远是 parser-derived；未来 `vision_desc/vision_table_*` 只能写 vision-derived 字段，不能覆盖 parser 字段。
+
 ## 4. API 契约（REST + SSE）
 
 ```
@@ -152,7 +158,8 @@ POST /api/papers                     # multipart 上传 → {paper_id}；后台�
 GET  /api/papers                     # 列表（含状态）
 GET  /api/papers/{id}                # 状态/元数据/错误
 GET  /api/papers/{id}/blocks         # 全部块（阅读器初始化用）
-GET  /api/papers/{id}/figures        # 图表卡片
+GET  /api/papers/{id}/figures        # 图表/card 数据；parser 数据即使 vision pending 也可返回
+GET  /api/figures/{figure_id}/image   # 按 ID 安全返回裁切图，不向前端暴露绝对 image_path
 GET  /api/papers/{id}/glossary?format=json|csv
 
 POST /api/papers/{id}/translate      # body: {pages?: [..], block_ids?: [..]} 启动/补翻
@@ -169,6 +176,8 @@ POST /api/papers/{id}/proposals      # 三层改进方向（含 pairwise 与检�
 GET  /api/papers/{id}/proposals      # 返回第一层可改动点(idx=0) + 全部提案卡
 GET  /api/health                     # 启动自检结果（key/模型/解析服务连通性）
 ```
+
+S3.5 不要求新增布局 REST API：`blocks + translations + figures` 已足够渲染中文版式页。问答/报告返回的 anchor 继续是稳定 Block/Figure ID，前端统一解析为 Reader 导航目标。
 
 **SSE 事件约定**（翻译流为例）：
 ```
@@ -193,43 +202,109 @@ event: finished     data: {}
 - prompt 模板 jinja2 `.md` 文件，模板名=任务名，git 管理即版本管理。
 
 ### 5.3 翻译（translate/）
-- 首轮：抽 title/abstract/标题块 + 高频专名 → `glossary` 任务产出术语表（结构化 `[{source,target}]`，入表，version=1）。
-- 队列：`heapq` 优先级 = (0 if in_viewport else 1, order_idx)；`/viewport` 上报即时重排；单 worker 协程消费（避免并发打爆限速），每批 3-5 块携带术语表命中子集 + 前后各 1 块上下文。
-- 落库前校验：中文字符占比 < 0.4 且原文非公式 → 自动重译一次；仍失败标 `failed`。
-- 幂等：`translations` 表即缓存，重启后 `status != done` 的块重新入队。
+- **Glossary 是 Paper/Run 级准备步骤**：抽 title/abstract/标题块 + 本地候选术语，受 `glossary.max_source_chars` 上限约束；`per-paper lock → lock 内二次查询 → exactly one generation`。已有 glossary 直接 DB hit；生成失败则 Run fail-fast，后续 batch 不再隐式重试，也不为尚未调用 translate 的 Block 创建 failed Translation。
+- **队列**：单 worker 优先级队列支持 `retranslate > visible viewport > next screen > scoped normal > whole-paper background`；viewport 只上报可见 Block ID，下一屏由服务端按 `order_idx` 推导。batch 默认 3-5 个相邻目标块，带术语表命中子集 + 前后各 1 块 context-only。
+- **内容分类**：empty/whitespace、URL/email、纯 HTML、arXiv/脚注元数据等明确 `skipped`，不进入 translate、不创建 failed row；Formula/Figure/Table 继续按 `is_translatable` 规则排除。
+- **结构化结果**：batch 输出按 Block ID 做 per-block validation；有效 sibling 可立即 partial commit。只对无效 ID 做一次 structured correction，仍无效的目标才写 `failed`，不能让一个空输出拖死整个 batch。
+- **语言漂移**：中文比例阈值默认 0.4；URL、邮箱、HTML tag、标点/数字/空白/LaTeX 等噪声从 denominator 排除。只对漂移 Block 精准重试一次。
+- **幂等**：`done` 与 `failed` 都是普通 `submit()` 的持久缓存终态；普通范围重交不自动重试 failed。只有显式 `/retranslate` 才重新收费。旧成功重译采用“成功后替换、失败保留旧译文”的安全语义。
+- **调用重试**：LiteLLM/OpenAI client 内部 `num_retries=0`，只保留项目层可审计的 task-level timeout/retry；glossary 与 translate 可有独立配置。
+- **SSE**：`block/progress/error/finished`；Run-level glossary failure 使用全局 error，不伪装成 Block 翻译失败；SQLite 是 done/failed/skipped 的权威状态，SSE 只是实时层。
 
-### 5.4 图表卡片（figures/cards.py）
-- 输入 = 裁切原图 + **图注块原文 + 图所在页的前后相邻 text 块**（防图注过短/图文不同页导致检索漏召回）；表格额外要求输出 HTML 结构化转录存 `table_html`。
-- 每卡独立任务，失败落 `figures.status='failed'` + `error`，可单卡重试。
+### 5.4 图表卡片（S4A/S4B，详情层而非排版层）
 
-### 5.5 问答（rag/）
-- 索引：解析完成后后台把 text 块（title+正文，过滤 <30 字符碎块）与图表卡片（desc+caption+table_html 文本化）各自 embed 入两张 vec 表（`max_length=512`，批量编码，KNN 查询带 `paper_id` 分区）。
-- 查询流程：`embed(question)` → 两路各取 top-8 → 合并去重成**编号候选集**（含 block 摘要与 figure 卡片）→ 若命中 figure，附裁切原图 → `call_structured(qa, AnsweredWithAnchors)`，schema 中 `claims[].anchor_ids` 只允许候选集编号，服务端映射回 block_id 并丢弃非法值 → top1 相似度低于阈值时 `confidence=low` 并在 prompt 中强化拒答许可。qa prompt 固定附**术语表命中子集**（中文提问 ↔ 英文原文的术语对齐靠它）。
-- 划选提问：`selected_block_ids` 直接作为候选集前排，不走检索；**选中块为 figure/table 时附裁切原图**。
+**S4A（不依赖真实视觉模型）**：
+- Figure/Table 只要 parser 数据存在即视为 Card 基础数据可用：`image crop + caption + page/bbox + nearby_block_ids`；Table 额外保留 MinerU 原始 `table_html`。
+- 对 `table_html` 做**确定性** HTML→cell JSON，形成 `parser_table_json`（row/column、header、rowspan/colspan、cell text 等）。它属于 parser-derived 数据，不调用 LLM。
+- Reader 主体中的 Figure/Table 仍在版式页原位展示；Card 的 description、结构化细节、状态和重试入口放在点击后的 drawer/popover。
+- Card 状态与 vision 状态解耦：parser 数据 ready 时 Card 可读；另维护 `vision_status` / `embedding_status`，不能因为 vision pending/failed 把 caption/image/table_html 一并判不可用。
+- fake vision client 先跑通结构化 schema、缓存、失败重试和旧成功结果保护。
+
+**S4B（真实视觉模型，需单独批准）**：
+- 输入 = 裁切原图 + **图注原文 + 同页最近前/后有效 text Block**；缺失则为空，不跨页伪造上下文。
+- Figure 输出 `vision_desc` 等 vision-derived 字段；Table 的视觉转录写 `vision_table_md/vision_table_json`，**不得覆盖** MinerU `table_html` 或 `parser_table_json`。
+- provenance 分离：`source_hash` 只描述图像/caption/nearby parser 输入；`generator_fingerprint` 单独描述 vision model、prompt version、generation config。
+- 刷新遵循“旧成功保护”：新生成成功后原子替换；刷新失败保留旧成功 Card，并记录 refresh error；首次生成失败才进入 failed。
+- 每卡独立任务，可精准 retry；真实 provider、Base URL、model ID、图片协议不在代码中猜测，走现有 LiteLLM task route。
+
+### 5.5 Embedding / 检索基础与问答边界（S4 → S5）
+
+**S4A embedding/index 基础**：
+- bge-m3 只生成 dense 1024 维向量，项目级 `max_length=512`；正文 payload 默认只带最近 section heading + `content_md`，不对每个正文重复拼 paper title。短标题可按确定性规则补 paper title。
+- Block 入索引先复用内容分类器排除 empty/URL/email/HTML/meta；`title` 非空即可，普通 text 的最小长度通过 `embedding.min_text_chars` 配置（初始值由真实 ResNet 统计验证，不把预计候选数写死）。
+- 进程级 lazy singleton；首次加载用 lock，CPU inference 额外用 semaphore=1，避免多个 `to_thread()` 同时抢 CPU/RAM。运行时不得隐式联网下载模型；配置应指向明确本地模型目录/固定 revision。
+- `embedding_records`（S4 schema upgrade）记录 `source_hash` 与 `model_fingerprint`，两者分离。refresh 先 encode+校验新 vector，再事务性替换旧 vec；刷新失败不得先删旧成功向量。
+- Figure/Table 的初始向量可由 parser-derived Card 生成：Figure=`caption+nearby text`；Table=`caption+parser_table_json normalized text+nearby text`。若文本不足则记录 `insufficient_text`，等 vision 内容成功后触发 refresh。
+- sqlite-vec 查询必须在 KNN 内使用 `paper_id` partition filter；S4 实现内部 `embed_query()/search_blocks()/search_figures()` 并做中英跨语言召回 smoke，但暂不冻结正式产品级 search HTTP contract。
+
+**S5 问答**：
+- 查询流程：`embed(question)` → 文本/图表两路召回 → 合并去重成**编号候选集**（含 block 摘要与 figure 卡片）→ 若命中 figure，附裁切原图 → `call_structured(qa, AnsweredWithAnchors)`；schema 中 `claims[].anchor_ids` 只允许候选集编号，服务端映射回稳定 Block/Figure ID 并丢弃非法值 → top1 相似度低于阈值时 `confidence=low` 并在 prompt 中强化拒答许可。qa prompt 固定附术语表命中子集。
+- 划选提问：左 PDF 或右中文版式上的选择最终都转换为 `selected_block_ids`，直接作为候选集前排，不走检索；选中 figure/table 时附裁切原图。
+- 前端来源锚点不跳“卡片编号”，统一调用 `navigateToAnchor(anchor)`：左 PDF 定位 page+bbox，右 `layout` 视图定位对应中文 Block/Figure，并同步高亮；`structured` 模式也能定位同一 ID。
 
 ### 5.6 精读与改进方向（report/）
-- 每段一个 prompt 模板，输入 = 缓存全文前缀 + 相关图表卡片（④⑥）+ 已生成段的 `summary` 列表 + （可选）对话摘要。输出 schema：`{content_md, anchors, summary}`，锚点同样走受限候选集（该段检索 top-16 作候选）。**s6（实验与消融）模板内置"复现风险审查"固定 checklist：benchmark 选择恰当性 / 数据泄漏嫌疑 / 指标误用 / post-hoc 挑结果**——实现时不可省略。
+- 每段一个 prompt 模板，输入 = 缓存全文前缀 + 相关图表卡片（④⑥）+ 已生成段的 `summary` 列表 + （可选）对话摘要。输出 schema：`{content_md, anchors, summary}`，锚点同样走受限候选集（该段检索 top-16 作候选）；前端点击 anchor 统一回跳版式 Reader（左 PDF bbox + 右中文版式对应块/图表）。**s6（实验与消融）模板内置"复现风险审查"固定 checklist：benchmark 选择恰当性 / 数据泄漏嫌疑 / 指标误用 / post-hoc 挑结果**——实现时不可省略。
 - 三层改进方向：第一层（枚举→三角色 checklist 批评→修订，**结果存 `proposal_cards` idx=0/kind=axes**）→ 第二层提案卡（Pydantic：question/why_now/mvp_experiment/feasibility/info_gaps/risk_planB）→ 第三层每卡故事线生成 3 候选 → pairwise 两两比较（3 次 `compare` 调用）取胜者 → 具体性检查器（规则：须含 ≥1 数据集名 + ≥1 模块/指标名；再过 haiku checklist）不合格段落打回重生成（最多 1 轮）。
 
-### 5.7 阅读器前端（frontend/reader/）
-- PdfPane：pdfjs-dist 按页 canvas 自绘渲染 + 每页一个绝对定位 overlay div，块高亮画在 overlay（bbox 从 0-1000 归一化换算页实际尺寸）。**渲染就绪信号：自绘模式下没有 `pagerendered` 事件（它属于 pdf_viewer 组件的 EventBus），用 `page.render()` 返回的 `RenderTask.promise` 维护 per-page ready promise，跳转未渲染页时 await 后再画框**。低置信块（`blocks.confidence` 低于阈值）在 overlay 上加弱提示样式。
-- TransPane：虚拟列表（react-virtuoso）渲染译文块，KaTeX 渲染公式块，figure 块内嵌 `<img>` + 翻译图注。readerStore 含 `viewMode` 枚举（`side-by-side | translation-only`），TransPane 按枚举分支渲染，MVP 只实现 side-by-side（枚举位为推迟的"纯译文全宽"留接口）。翻译/报告等产出若 `model` 字段与当前路由不一致，UI 角标提示"由旧模型生成"，提供重刷入口。
-- SyncController：IntersectionObserver 取左侧可见页/块 → 计算主块 → TransPane scrollTo；反向同理；悬停用共享 `hoverBlockId` store 双向高亮；滚动同步加 200ms 防抖 + "正在程序化滚动"互斥锁防回环。
-- 视口上报：可见块集合变化时 debounce 500ms POST `/viewport`。
+### 5.7 阅读器前端（frontend/reader/）— S3.5 版式翻译 Reader
+
+- **PdfPane 保持 S2 实现不动**：pdfjs-dist 按页 canvas 自绘 + 每页绝对定位 overlay；bbox 从 0-1000 换算到页面 CSS viewport。page-ready 使用 `page.render()` 返回的 `RenderTask.promise`，目标页未渲染时 await 后再画框。不要为了中文版式 Reader 重写 PdfPane、bbox 语义或 DPR 逻辑。
+
+- **LayoutEngine（确定性、无 LLM）**：输入 `page/bbox/order_idx/type`，派生：
+  ```text
+  column          -- left | right | full | unknown
+  layout_group    -- 同列/同跨栏组
+  x_ratio
+  width_ratio
+  span
+  ```
+  横向 bbox 用于列归属、位置和宽度；纵向 y 主要用于排序与原始间距提示。无法可靠判定时以 `order_idx` 保证阅读顺序，不伪造高精度布局。
+
+- **LayoutTransPane（默认 `viewMode=layout`）**：
+  - 按原 PDF 页建立对应的 HTML page shell；尽量保持同样宽高比、页边距与单双栏骨架。
+  - title/text/caption/formula/figure/table 仍绑定原 `block.id`。
+  - 中文 text 不设置原 bbox 固定高度，允许内容自然撑高；同一 layout group 内后续 Block 顺次下移（local reflow）。禁止为了“一页像素对一页”极端缩字号。
+  - Figure 在原列/跨栏位置显示 crop；Table 优先显示安全的 parser 结构；caption 在对应位置显示译文/原文 fallback。
+  - page shell 可以因中文 reflow 局部增高；同步以 Block anchor 为准，不使用左右像素滚动比例。
+  - pending/failed/skipped 的展示复用 S3 状态：pending 可英文 fallback，failed 显式错误/重试，skipped 保留原文及 skip reason。
+
+- **StructuredBlockPane（保留现有实现）**：现有 react-virtuoso Block 流不删除，改为 `viewMode=structured`。它继续承担 block id/type/status、原文展开、重译、错误诊断等精细操作。不要把它作为默认论文阅读形态。
+
+- **viewMode**：
+  ```text
+  layout       -- 默认：原 PDF + 中文版式页
+  structured   -- 辅助：原 PDF + Block 流
+  ```
+  未来 `translation-only` 等模式可再扩展，不在 S3.5 实现。
+
+- **SyncController 只依赖稳定身份**：
+  - 左→右：IntersectionObserver/当前可见 bbox 得到主 `block.id` → `LayoutTransPane/StructuredBlockPane.scrollToBlock(id)`；
+  - 右→左：右侧可见主 Block → PdfPane `scrollTo(page)` → page ready 后高亮 bbox；
+  - hover 使用共享 `hoverBlockId`；
+  - 程序化滚动使用 generation/token + user takeover 机制防回环，不能退化成简单固定 200ms 锁；
+  - 中文高度变化只影响右侧 DOM，不改变 anchor 身份。
+
+- **统一 AnchorNavigator**：S5 QA、S6 report、Figure/Table 详情都只提交 `block_id/figure_id`，由 navigator 查实体后同时定位左 PDF 与右版式页。引用不通过正文短语模糊匹配。
+
+- **Figure/Table 详情层**：正文原位对象可点击打开 drawer/popover，展示 parser 数据、vision description、表格结构、状态/重试和相关上下文；关闭后阅读位置不变。AI Card 不插入正文流造成布局跳变。
+
+- **视口翻译优先级**：可见 Block 集合来自当前 active 右侧视图；变化时 debounce 后 POST `/viewport`。`layout` 与 `structured` 都上报同一 Block ID 集合。
+
+- **S3.5 不改变翻译/解析业务语义**：不改 glossary、Translation cache、MinerU、Figure crop、Block ID、page/bbox；只是增加新的 renderer 与共享导航层。
 
 ## 6. 跨切面
 
 - **配置**：`config.yaml`（路由表/阈值/解析服务 URL）+ `.env`（key）。启动自检：key 有效性（1 次最小调用）、解析服务连通（MinerU `/health`）、sqlite-vec 加载（失败时输出 VC++ Redistributable/自编译 DLL 两条诊断路径——Windows 加载失败有社区实录，此项列入 S0/S1 验收）、embedding 模型可用、孤儿 `parsing` 状态回收，结果落 `/api/health`，前端启动页展示。
 - **错误与状态**：所有长任务在对应表上有 `status/error` 字段；SSE 通道有 `error` 事件；前端所有异步卡片三态（loading/失败+原始错误码/重试按钮）。
-- **测试**：spike 断言集（S0 建立，S7 回归）；单测覆盖 postprocess 正则、优先级队列、漂移校验、锚点校验映射；prompt 变更用 3 篇固定论文的"金样例"人工 diff。
-- **实现顺序**：严格按 mvp-plan §三 的 S0→S7；每步的验收即 mvp-plan §七 对应条目。
+- **测试**：spike 断言集（S0 建立，S7 回归）；单测覆盖 postprocess 正则、优先级队列、漂移校验、锚点校验映射；S3.5 增加双栏/跨栏 layout 推导、中文长短 reflow、Figure/Table 原位、`layout↔structured↔PDF` 同一 block 导航、快速滚动 user takeover 与无回环 E2E；prompt 变更用 3 篇固定论文的“金样例”人工 diff。
+- **实现顺序**：严格按 mvp-plan §三 的 `S0→S1→S2→S3→S3.5→S4A→S4B→S5→S6→S7`；S3.5 只改展示层，S4A 先本地数据/embedding/fake vision，真实视觉在 S4B 单独 gate。
 
 ## 7. 已知风险的技术对策映射
 
 | 风险（mvp-plan §六） | 本方案对策 |
 |---|---|
-| R1 解析质量 | §5.1 服务化+锁版本+postprocess 兜底；spike/parse_bench.py 断言化；bbox_viewer 常驻 |
-| R2 锚点可靠性 | §5.2 call_structured + §5.4 受限候选集 + 服务端校验；拒答计正确 |
+| R1 解析质量 | §5.1 服务化+锁版本+postprocess 兜底；spike/parse_bench.py 断言化；bbox_viewer 常驻；S3.5 额外用 bbox/order 验证单双栏与跨栏 layout 推导，不允许布局算法改写 Block 事实 |
+| R2 锚点可靠性 | §5.2 call_structured + §5.5 受限候选集 + 服务端校验；拒答计正确 |
 | Windows 部署 | MinerU 走 WSL2/Docker HTTP 服务（异步 /tasks API），主应用纯 Windows Python；无 GPU 时 pipeline 后端兜底；CUDA 驱动版本 spike 第一步核查 |
 | sqlite-vec Windows DLL 加载失败 | setup 锁验证过的 wheel + 启动自检 + 诊断指引（S0/S1 验收项） |
 | 成本失控 | 路由表分档 + prompt caching（注意 5 分钟 TTL 口径）+ 全量持久化缓存 + llm_calls 成本日志 |

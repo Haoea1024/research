@@ -5,8 +5,9 @@ import { consumeTranslationStream } from "../api/sse";
 import type { Block, Figure, Paper, Translation } from "../api/types";
 import { useReaderStore } from "../stores/readerStore";
 import { useTranslationStore } from "../stores/translationStore";
-import { BlockPane } from "./BlockPane";
 import { PdfPane } from "./PdfPane";
+import { TranslationPane } from "./TranslationPane";
+import type { PageMetrics } from "./types";
 import { useSyncController } from "./SyncController";
 
 interface ReaderPageProps {
@@ -75,7 +76,10 @@ function ReadyReader({ data, paperId }: { data: ReaderData; paperId: string }) {
   const streamError = useTranslationStore((state) => state.streamError);
   const streamErrorCode = useTranslationStore((state) => state.streamErrorCode);
   const clearRunError = useTranslationStore((state) => state.clearRunError);
+  const translationByBlockId = useTranslationStore((state) => state.byBlockId);
   const [starting, setStarting] = useState(false);
+  const [confirmFullTranslation, setConfirmFullTranslation] = useState(false);
+  const [pageMetrics, setPageMetrics] = useState(new Map<number, PageMetrics>());
   const streams = useRef(new Map<string, AbortController>());
 
   useEffect(() => {
@@ -135,11 +139,25 @@ function ReadyReader({ data, paperId }: { data: ReaderData; paperId: string }) {
     void paperApi.viewport(paperId, visibleBlockIds).catch(() => undefined);
   }, [paperId]);
 
+  const recordPageMetrics = useCallback((page: number, metrics: PageMetrics) => {
+    setPageMetrics((current) => {
+      const previous = current.get(page);
+      if (previous?.width === metrics.width && previous.height === metrics.height) return current;
+      const next = new Map(current);
+      next.set(page, metrics);
+      return next;
+    });
+  }, []);
+
+  const estimatedTargetCount = data.blocks.filter((block) =>
+    block.is_translatable && (translationByBlockId[block.id]?.status ?? "pending") === "pending"
+  ).length;
+
   return (
     <main className="reader-shell">
       <header className="reader-header">
         <div>
-          <span className="eyebrow">SIDE-BY-SIDE READER · S3</span>
+          <span className="eyebrow">LAYOUT TRANSLATION READER · S3.5</span>
           <h1>{data.paper.title ?? "未命名论文"}</h1>
         </div>
         <div className="translation-actions">
@@ -155,11 +173,26 @@ function ReadyReader({ data, paperId }: { data: ReaderData; paperId: string }) {
               {progress.done}/{progress.total} done · {progress.failed} failed · {progress.skipped ?? 0} skipped
             </span>
           ) : null}
-          <button className="translate-button" disabled={starting} onClick={() => void startTranslation()}>
-            {starting ? "正在创建任务…" : "开始/继续翻译"}
+          <button className="translate-button" disabled={starting} onClick={() => setConfirmFullTranslation(true)}>
+            {starting ? "正在创建任务…" : `翻译全文 · 预计目标 ${estimatedTargetCount} 个 Block`}
           </button>
         </div>
       </header>
+      {confirmFullTranslation ? (
+        <div className="translation-confirm-backdrop" role="presentation">
+          <section className="translation-confirm" role="dialog" aria-modal="true" aria-labelledby="translation-confirm-title">
+            <h2 id="translation-confirm-title">确认翻译全文</h2>
+            <p>将提交整篇论文；预计有 {estimatedTargetCount} 个尚未处理的目标 Block。已完成、失败缓存和确定性跳过项不会自动重译。</p>
+            <div className="translation-confirm-actions">
+              <button type="button" onClick={() => setConfirmFullTranslation(false)}>取消</button>
+              <button type="button" className="translate-button" onClick={() => {
+                setConfirmFullTranslation(false);
+                void startTranslation();
+              }}>确认翻译全文</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       <div className="reader-grid">
         <PdfPane
           ref={sync.pdfPaneRef}
@@ -167,13 +200,15 @@ function ReadyReader({ data, paperId }: { data: ReaderData; paperId: string }) {
           blocks={data.blocks}
           onActiveBlock={sync.onPdfActiveBlock}
           onUserIntent={sync.onPdfUserIntent}
+          onPageMetrics={recordPageMetrics}
         />
-        <BlockPane
-          ref={sync.blockPaneRef}
+        <TranslationPane
+          ref={sync.translationPaneRef}
           blocks={data.blocks}
           figures={data.figures}
-          onActiveBlock={sync.onBlocksActiveBlock}
-          onUserIntent={sync.onBlocksUserIntent}
+          pageMetrics={pageMetrics}
+          onActiveBlock={sync.onTranslationActiveBlock}
+          onUserIntent={sync.onTranslationUserIntent}
           onVisibleBlocks={viewport}
           onRetranslate={(blockId) => void retranslate(blockId)}
         />

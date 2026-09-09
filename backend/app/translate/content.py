@@ -16,6 +16,11 @@ _ARXIV_META = re.compile(
     re.IGNORECASE,
 )
 _LETTERS = re.compile(r"[A-Za-z\u4e00-\u9fff]")
+_REFERENCE_ENTRY = re.compile(r"(?:^|\n)\s*\[\d+\]\s+")
+_TRAILING_CONTINUATION = re.compile(
+    r"\b(?:a|an|and|as|at|by|for|from|in|of|on|or|the|to|with)\s*$",
+    re.IGNORECASE,
+)
 
 
 def translation_skip_reason(block: Block) -> str | None:
@@ -27,6 +32,16 @@ def translation_skip_reason(block: Block) -> str | None:
         return "HTML_ONLY_METADATA"
     if _ARXIV_META.fullmatch(visible):
         return "DOCUMENT_METADATA"
+    if len(_REFERENCE_ENTRY.findall(visible)) >= 5:
+        return "REFERENCE_LIST"
+    if (
+        block.type == "text"
+        and 30 <= len(visible) <= 180
+        and len(visible.split()) >= 7
+        and not re.search(r"[.!?;:\u3002\uff01\uff1f\uff1b]\s*$", visible)
+        and _TRAILING_CONTINUATION.search(visible)
+    ):
+        return "MALFORMED_FRAGMENT"
 
     urls = _URL.findall(visible)
     emails = _EMAIL.findall(visible)

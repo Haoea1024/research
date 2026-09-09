@@ -1,4 +1,4 @@
-"""FastAPI application factory for S1."""
+"""FastAPI application factory."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .api.health import build_health_router
+from .api.figures import build_figures_router
 from .api.papers import build_papers_router
 from .api.translations import build_translation_router
 from .config import Settings, load_settings
@@ -56,13 +57,14 @@ def create_app(
         finally:
             await translation_manager.close()
 
-    app = FastAPI(title="Paper Reading Agent", version="0.3.0-s3", lifespan=lifespan)
+    app = FastAPI(title="Paper Reading Agent", version="0.3.5-s3.5", lifespan=lifespan)
     app.state.settings = settings
     app.state.database = database
     app.state.paper_service = service
     app.state.translation_manager = translation_manager
     app.include_router(build_health_router(database, settings))
     app.include_router(build_papers_router(service, settings.storage.upload_dir))
+    app.include_router(build_figures_router(service, settings.parser.output_dir))
     app.include_router(build_translation_router(translation_manager))
     return app
 

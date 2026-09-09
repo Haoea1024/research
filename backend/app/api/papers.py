@@ -90,7 +90,8 @@ def build_papers_router(service: PaperService, upload_dir: Path) -> APIRouter:
             result = []
             for figure in figures:
                 parent = blocks.get(figure.block_id)
-                caption_text = parent.content_md if parent else None
+                caption = blocks.get(figure.caption_block_id) if figure.caption_block_id else None
+                caption_text = caption.content_md if caption else (parent.content_md if parent else None)
                 if figure.table_html and caption_text:
                     suffix = f"\n\n{figure.table_html}"
                     if caption_text == figure.table_html:
@@ -106,7 +107,9 @@ def build_papers_router(service: PaperService, upload_dir: Path) -> APIRouter:
                         paper_id=figure.paper_id,
                         block_id=figure.block_id,
                         caption_block_id=figure.caption_block_id,
-                        image_path=figure.image_path,
+                        image_url=f"/api/figures/{figure.id}/image"
+                        if figure.image_path
+                        else None,
                         table_html=figure.table_html,
                         caption_text=caption_text,
                         diagnostics=diagnostics,

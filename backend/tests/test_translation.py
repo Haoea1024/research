@@ -13,7 +13,7 @@ from app.config import TranslationConfig
 from app.models import Block, GlossaryTerm, Paper, Translation
 from app.translate.glossary import GlossaryService
 from app.translate.content import translation_skip_reason
-from app.translate.language import chinese_character_ratio
+from app.translate.language import chinese_character_ratio, translation_language_ratio
 from app.translate.pipeline import TranslationManager, TranslationScopeError
 
 
@@ -153,6 +153,67 @@ def test_empty_and_metadata_blocks_have_explicit_skip_reasons() -> None:
     assert translation_skip_reason(block("<sup>1</sup> https://example.com/path")) == "URL_METADATA"
     assert translation_skip_reason(block("name@example.com")) == "CONTACT_METADATA"
     assert translation_skip_reason(block("正文中参见 https://example.com 获取完整结果。")) is None
+
+
+def test_reference_lists_and_truncated_parser_fragments_are_skipped() -> None:
+    def block(content: str) -> Block:
+        return Block(
+            id="parser-anomaly",
+            paper_id="paper",
+            order_idx=0,
+            page=0,
+            bbox="[0,0,1,1]",
+            type="text",
+            content_md=content,
+            is_translatable=1,
+        )
+
+    references = "\n".join(f"[{index}] Author. Paper title." for index in range(1, 8))
+    assert translation_skip_reason(block(references)) == "REFERENCE_LIST"
+    assert translation_skip_reason(
+        block("50-layer ResNet: We replace each 2-layer block in the")
+    ) == "MALFORMED_FRAGMENT"
+    assert translation_skip_reason(block("A complete sentence ends normally.")) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "translated"),
+    [
+        ("4.1. ImageNet Classification", "4.1. ImageNet 分类"),
+        ("PASCAL VOC", "PASCAL VOC"),
+        ("ResNet", "ResNet"),
+        ("CIFAR-10", "CIFAR-10"),
+    ],
+)
+def test_title_language_check_allows_preserved_standard_proper_nouns(
+    source: str, translated: str
+) -> None:
+    block = Block(
+        id="title",
+        paper_id="paper",
+        order_idx=0,
+        page=0,
+        bbox="[0,0,1,1]",
+        type="title",
+        content_md=source,
+        is_translatable=1,
+    )
+    assert translation_language_ratio(block, translated) >= 0.4
+
+
+def test_title_language_check_does_not_accept_untranslated_ordinary_words() -> None:
+    block = Block(
+        id="title",
+        paper_id="paper",
+        order_idx=0,
+        page=0,
+        bbox="[0,0,1,1]",
+        type="title",
+        content_md="4.1. ImageNet Classification",
+        is_translatable=1,
+    )
+    assert translation_language_ratio(block, "4.1. ImageNet Classification") < 0.4
+    assert translation_language_ratio(block, "ImageNet") < 0.4
 
 
 def test_glossary_double_checked_lock_and_csv(database) -> None:
@@ -385,6 +446,31 @@ def test_failed_cache_requires_explicit_retranslate(database) -> None:
     assert [task for task, _ in llm.calls] == ["translate"]
     with database.session() as session:
         assert session.get(Translation, "b0").status == "done"
+
+
+def test_new_skip_guard_overrides_historical_failed_row_without_deleting_it(database) -> None:
+    paper, _ = seed(database)
+    with database.session() as session:
+        session.get(Block, "b0").content_md = (
+            "50-layer ResNet: We replace each 2-layer block in the"
+        )
+        session.add(
+            Translation(
+                block_id="b0",
+                zh_text="",
+                glossary_version=1,
+                model="fake/old",
+                status="failed",
+                error="historical timeout",
+            )
+        )
+    manager = TranslationManager(database.SessionLocal, FakeLLM(), TranslationConfig())
+
+    visible = {item["block_id"]: item for item in manager.translations(paper.id)}
+    assert visible["b0"]["status"] == "skipped"
+    assert visible["b0"]["skip_reason"] == "MALFORMED_FRAGMENT"
+    with database.session() as session:
+        assert session.get(Translation, "b0").status == "failed"
 
 
 def test_glossary_failure_fails_run_without_block_rows_or_translate_calls(database) -> None:

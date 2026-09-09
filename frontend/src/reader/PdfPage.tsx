@@ -11,7 +11,7 @@ import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 
 import type { Block } from "../api/types";
 import { BboxOverlay } from "./BboxOverlay";
-import { PAGE_PRELOAD_MARGIN, PAGE_SCALE } from "./types";
+import { PAGE_PRELOAD_MARGIN, PAGE_SCALE, type PageMetrics } from "./types";
 
 export interface PdfPageHandle {
   ensureRendered(): Promise<void>;
@@ -23,10 +23,11 @@ interface PdfPageProps {
   pageNumber: number;
   blocks: Block[];
   scrollRootRef: RefObject<HTMLDivElement>;
+  onPageMetrics?: (page: number, metrics: PageMetrics) => void;
 }
 
 export const PdfPage = forwardRef<PdfPageHandle, PdfPageProps>(function PdfPage(
-  { document, pageNumber, blocks, scrollRootRef },
+  { document, pageNumber, blocks, scrollRootRef, onPageMetrics },
   ref,
 ) {
   const shellRef = useRef<HTMLDivElement>(null);
@@ -50,6 +51,7 @@ export const PdfPage = forwardRef<PdfPageHandle, PdfPageProps>(function PdfPage(
       const viewport = page.getViewport({ scale: PAGE_SCALE });
       if (!mountedRef.current) return;
       setViewportSize({ width: viewport.width, height: viewport.height });
+      onPageMetrics?.(pageNumber - 1, { width: viewport.width, height: viewport.height });
       const canvas = canvasRef.current;
       if (!canvas) throw new Error(`Canvas for PDF page ${pageNumber} is unavailable`);
       const context = canvas.getContext("2d");
@@ -113,6 +115,7 @@ export const PdfPage = forwardRef<PdfPageHandle, PdfPageProps>(function PdfPage(
         if (!mountedRef.current) return;
         const viewport = page.getViewport({ scale: PAGE_SCALE });
         setViewportSize({ width: viewport.width, height: viewport.height });
+        onPageMetrics?.(pageNumber - 1, { width: viewport.width, height: viewport.height });
       })
       .catch((reason: unknown) => {
         if (mountedRef.current) {
@@ -143,7 +146,7 @@ export const PdfPage = forwardRef<PdfPageHandle, PdfPageProps>(function PdfPage(
       readyPromiseRef.current = null;
       pagePromiseRef.current = null;
     };
-  }, [document, pageNumber, scrollRootRef]);
+  }, [document, onPageMetrics, pageNumber, scrollRootRef]);
 
   return (
     <article

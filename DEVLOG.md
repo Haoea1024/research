@@ -1,5 +1,19 @@
 # DEVLOG — 文献研读 Agent 开发记录
 
+## 2026-09-08 — S3.5：Layout Translation Reader 实现
+
+- 用户手动替换的 `mvp-plan.md`、`paper-reading-agent-design.md`、`tech-plan.md` 已保留；开发分支为 `s3.5-layout-reader`，基线仍是 S3 checkpoint `715b0bf`。
+- Reader 默认改为左侧原始 PDF、右侧中文版式阅读页；原 `BlockPane` 通过 `StructuredBlockView` 保留，两个视图共享 `block.id`、active/hover、Translation store 与既有 SyncController。
+- 新增纯前端确定性 layout derivation：按页输出 `single-column / two-column / fallback-flow`、confidence、diagnostics、full/left/right/marginalia 和仅用于视觉分组的 media row。无 DB schema 变化、无 layout API、无 LLM。
+- 中文正文在列内自然 reflow；done 显示中文，pending/queued/translating/failed/skipped 使用英文 fallback 与既有状态/显式重译语义；公式复用 KaTeX。
+- Figure/Table 在正文原位通过新 `GET /api/figures/{figure_id}/image` 显示 MinerU 裁切图和 parser caption。端点按 ID 查库、限定 parser 输出目录、拒绝任意路径；API 不再暴露绝对 `image_path`。未实现或注入 raw `table_html`，确定性 table parser 留到 S4A。
+- Layout/Structured 切换在改变组件前建立本地 generation target；虚拟列表按目标进入可见范围后收敛，并保持 programmatic pin 直到用户 wheel/pointer/touch 接管。真实 E2E 确认 active block 保留、PDF 位置稳定且无 ping-pong。
+- 右侧采用 page-level `react-virtuoso`，每页内容由 ResizeObserver 驱动动态测量；图片 lazy-load，中文页高于原 PDF 时自然延长。PDF 页宽高比来自 pdf.js viewport 回调，未渲染时使用确定性 612×792 fallback。
+- ResNet 真实检查：12 页 PDF；第一页确定为双栏，title/authors/abstract/introduction、两个并排 Figure crop 与 13 done / 4 skipped / 0 failed 正常；公式、后续 Figure/Table crop、双向 block-id 同步、hover、快速滚动和用户接管通过；console error/page exception 均为 0。
+- 仓库和既有 S0 资产仅发现同一篇 ResNet 的多份路径/解析产物，没有第二篇可直接复用的真实双栏解析数据；未下载、未重跑 MinerU，第二篇英文 fallback layout smoke 留待后续有现成资产时验收。
+- 本轮未安装依赖、未调用真实 LLM、未修改 MinerU 或 S3 翻译 pipeline、未实现 S4-S6、未 commit/push。
+- 最终无模型回归：后端 pytest 61 passed（保留 2 条已接受第三方弃用告警）；前端 Vitest 11 files / 32 tests；production build 通过（保留既有大 chunk warning）；真实 Chrome E2E 3 passed；`pip check`、secret scan 与 `git diff --check` 通过。
+
 ## 2026-09-07 — S0：环境探测、MinerU smoke test 与 bbox viewer
 
 ### 范围与环境
@@ -398,3 +412,24 @@ S3 获批的 fake/mock 全链路已完成，没有真实 LLM 调用。按约定�
 - 最终 ResNet 第 1 页权威状态为 13 done、4 skipped、0 failed；glossary 为 version 1、40 项，重复 `pages=[1]` 为 0 次新 LLM 调用。
 - 最终无模型回归：后端 60 passed（2 条既有第三方弃用告警）、前端 Vitest 9 files/25 tests、production build、Chrome E2E 2 tests、`pip check` 与 `git diff --check` 均通过。
 - S3 Translation 状态为 COMPLETE。本次收尾没有真实 LLM 请求，没有进入 S4。
+
+## 2026-09-09 — S3.5.1 correctness fixes（无真实模型调用）
+
+- 修复 marginalia 规则：取消单独以窄/高 bbox 判定，改为页面边缘、高窄纵向形态、与正文列低横向重叠的组合条件；`type=title` 不因窄 bbox 被归为边注。ResNet Page 1 的 `Abstract` 回到左栏，arXiv metadata 保持 marginalia。
+- 双栏证据加入稳定落在单侧且不跨 gutter 的 Figure/Table。ResNet Page 4 的 Figure 3 作为左栏证据，页面恢复双栏，右栏正文从顶部独立 reflow，不再被左栏高图整体下推。
+- Structured/Layout 复用安全 mixed-content renderer：支持 `$...$`、`\(...\)`、`\[...\]` 与 `<sup>`；数学由 KaTeX 渲染，`<sup>` 仅白名单解析，其他 HTML 不注入 DOM。
+- 翻译 eligibility 新增 `REFERENCE_LIST` 和 `MALFORMED_FRAGMENT`。ResNet `:123` 在 API view 中为 `skipped/REFERENCE_LIST`，`:89` 为 `skipped/MALFORMED_FRAGMENT`；不修改 MinerU raw、不补全文、不删除历史 failed 数据。
+- language drift 改为仅从评分分母排除“源文与译文中均原样保留”的标准专名 token；`ImageNet`、`PASCAL VOC`、`ResNet`、`CIFAR-10` 和 `4.1. ImageNet 分类` 通过专门 fake 回归，而未翻译普通英文仍失败。全局 0.4 阈值未降低。
+- 全文翻译按钮改为“翻译全文 · 预计目标 N 个 Block”，点击后必须在明确确认对话框中二次确认；普通 Reader 打开路径仍只有 GET，不自动提交翻译。
+- 当前 SQLite 历史状态不清理、不重译。读取 eligibility 时新 skip guard 优先于旧 failed 行，因此 `:89/:123` 对 UI 显示 skipped，而底层历史审计行仍保留 failed；其余历史 drift/timeout failed 仍需未来显式、受控 retranslate。
+- S3.6 caption translation 正式留项：以 `figure_id` 为键，字段规划为 `caption_source`、`caption_zh`、`caption_model`、`caption_status`，anchor 保持 `figure_id → block_id`；20 个无独立 bbox caption 不伪造 Caption Block。
+- 回归结果：后端 68 passed（2 条既有第三方弃用告警）、前端 11 files/36 tests、production build 通过、Chrome E2E 3 passed，console error/page exception 为 0。未执行真实 LLM、未修改数据库、未安装依赖、未进入 S4、未 commit/push。
+
+## 2026-09-09 — S3.5.1 最终受控恢复与验收
+
+- Short-title/proper-noun 受控复验仅显式重译 ResNet `:63`、`:128`、`:146`，均一次成功；glossary 新调用 0、translate/HTTP 各 3、structured/transport/drift retry 均 0。最终译文分别为 `4.1. ImageNet 数据集分类`、`PASCAL VOC 数据集`、`PASCAL VOC 数据集`，估算费用合计 `¥0.030501`。
+- Timeout recovery 仅显式重译历史 timeout Block `:87`、`:88`、`:124`、`:125`、`:126`，均一次成功；glossary 新调用 0、translate/HTTP 各 5、structured/transport/drift retry 均 0。总 input/output 为 4,210/6,419 tokens，总 latency 99,660 ms，`estimated_cost=¥0.211203`，不是平台账单。
+- 最终 API eligibility 为 121 done、0 failed、15 skipped。`:89` 与 `:123` 的历史 failed 行继续保留审计，但 API/UI 分别以 `MALFORMED_FRAGMENT`、`REFERENCE_LIST` 优先解释为 skipped，未删除历史数据。
+- 随后执行普通全文 submit，仅验证缓存/skip：121 done、15 skipped，新增 glossary、translate 和 HTTP attempt 均为 0。
+- 最终 Chrome 回归覆盖 Page 1 Abstract、Page 4 Figure 3、inline KaTeX、`<sup>`、short-title/proper-noun 与五个 timeout recovery Block；Layout/Structured 状态一致，Reader 打开 translate POST 0，console error 0，page exception 0。
+- S3.5 / S3.5.1 用户最终验收通过。本阶段未接入免费翻译 API、未进入 S4。
